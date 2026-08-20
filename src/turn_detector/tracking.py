@@ -49,6 +49,11 @@ def flatten_metrics(payload: dict[str, Any], *, prefix: str = "") -> dict[str, i
 
 class WandbTracker:
     def __init__(self, config: AppConfig) -> None:
+        # python-dotenv preserves NAME= as an empty string, but W&B validates some
+        # optional settings (especially WANDB_RUN_ID) before init and rejects empties.
+        for variable in ("WANDB_RUN_ID", "WANDB_RUN_NAME", "WANDB_ENTITY"):
+            if os.getenv(variable) == "":
+                os.environ.pop(variable, None)
         try:
             import wandb
         except ImportError as exc:  # pragma: no cover - dependency error path

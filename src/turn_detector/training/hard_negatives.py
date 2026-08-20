@@ -6,6 +6,7 @@ from typing import Any
 from turn_detector.config import ModelConfig
 from turn_detector.data.records import read_manifest, write_manifest
 from turn_detector.modeling import load_turn_model
+from turn_detector.progress import log_event, progress_bar
 from turn_detector.training.dataset import TurnAudioDataset, TurnCollator
 
 
@@ -24,6 +25,16 @@ def mine_hard_negatives(
     except ImportError as exc:  # pragma: no cover
         raise RuntimeError("Hard-negative mining requires the train extra") from exc
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    log_event(
+        "mine-hard-negatives",
+        "START",
+        model=model_path,
+        manifest=manifest_path,
+        device=device,
+        batch_size=batch_size,
+        top_fraction=top_fraction,
+        minimum_probability=minimum_probability,
+    )
     model = load_turn_model(model_path, map_location=str(device)).to(device).eval()
     dataset = TurnAudioDataset(manifest_path, model_config, augment=False)
     loader = torch.utils.data.DataLoader(
@@ -35,7 +46,12 @@ def mine_hard_negatives(
     )
     scores: dict[str, float] = {}
     with torch.inference_mode():
-        for batch in loader:
+        for batch in progress_bar(
+            loader,
+            total=len(loader),
+            description="mine hard negatives",
+            unit="batch",
+        ):
             output = model(
                 input_features=batch["input_features"].to(device),
                 frame_mask=batch["frame_mask"].to(device),
@@ -58,10 +74,12 @@ def mine_hard_negatives(
         for record in candidates[:keep]
     ]
     write_manifest(selected, output_path)
-    return {
+    result = {
         "scored": len(dataset.records),
         "eligible": len(candidates),
         "selected": len(selected),
         "minimum_probability": minimum_probability,
         "top_probability": scores[selected[0].id] if selected else None,
     }
+    log_event("mine-hard-negatives", "COMPLETE", output=output_path, **result)
+    return result

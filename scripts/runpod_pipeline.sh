@@ -41,8 +41,21 @@ run_stage() {
   if (( index < START_INDEX || index > STOP_INDEX )); then
     return 0
   fi
-  echo "Running stage: $name"
-  "$@"
+  local started_at
+  local finished_at
+  local elapsed
+  started_at="$(date +%s)"
+  echo "[$(date --iso-8601=seconds)] [pipeline:$name] START"
+  if "$@"; then
+    finished_at="$(date +%s)"
+    elapsed="$((finished_at - started_at))"
+    echo "[$(date --iso-8601=seconds)] [pipeline:$name] COMPLETE elapsed_seconds=$elapsed"
+  else
+    finished_at="$(date +%s)"
+    elapsed="$((finished_at - started_at))"
+    echo "[$(date --iso-8601=seconds)] [pipeline:$name] FAILED elapsed_seconds=$elapsed" >&2
+    return 1
+  fi
 }
 
 cache_and_pin() {
@@ -90,5 +103,5 @@ run_stage package uv run turn-detector package-model \
   --evaluation-dir artifacts/evaluation/e6 \
   --output artifacts/release/e6
 
-echo "Pipeline finished through: $STOP_AFTER"
+echo "[$(date --iso-8601=seconds)] [pipeline] COMPLETE through=$STOP_AFTER"
 echo "No model was uploaded. Review the reports/model card, then run the explicit push-model command."

@@ -23,6 +23,7 @@ from turn_detector.evaluation.metrics import (
     paired_group_bootstrap_delta,
 )
 from turn_detector.inference import TurnDetector
+from turn_detector.progress import log_event
 
 SMART_TURN_REPO = "pipecat-ai/smart-turn-v3"
 SMART_TURN_FILENAME = "smart-turn-v3.2-cpu.onnx"
@@ -126,10 +127,28 @@ def compare_baselines(
     """Paired candidate, public Smart Turn v3.2, and fixed-timeout evaluation."""
 
     manifest = Path(manifest_path or config.evaluation.test_manifest)
+    log_event(
+        "baselines",
+        "START",
+        candidate=candidate_model_path,
+        manifest=manifest,
+        smart_turn_revision=SMART_TURN_REVISION,
+        limit=limit or "none",
+    )
     candidate = TurnDetector(candidate_model_path)
     published = SmartTurnV32Baseline(smart_turn_model_path)
-    candidate_scored = score_manifest(candidate, manifest, limit=limit)
-    published_scored = score_manifest(published, manifest, limit=limit)  # type: ignore[arg-type]
+    candidate_scored = score_manifest(
+        candidate,
+        manifest,
+        limit=limit,
+        progress_description="baseline candidate",
+    )
+    published_scored = score_manifest(
+        published,
+        manifest,
+        limit=limit,
+        progress_description="baseline smart-turn-v3.2",
+    )
     candidate_ids = [row["id"] for row in candidate_scored]
     if candidate_ids != [row["id"] for row in published_scored]:
         raise RuntimeError("Candidate and baseline predictions are not aligned")
@@ -237,4 +256,12 @@ def compare_baselines(
                 serializable = {key: value for key, value in row.items() if key != "record"}
                 handle.write(json.dumps(serializable))
                 handle.write("\n")
+    log_event(
+        "baselines",
+        "COMPLETE",
+        examples=len(labels),
+        candidate_f1=f"{candidate_static['f1']:.5f}",
+        smart_turn_f1=f"{published_static['f1']:.5f}",
+        output=output_dir / "baseline_report.json",
+    )
     return report

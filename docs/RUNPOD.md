@@ -92,6 +92,20 @@ W&B receives training and validation metrics at the configured step intervals an
 checkpoint. Local `training_report.json` remains the source-of-truth fallback. If W&B is unavailable,
 set `WANDB_MODE=offline`; the training job still writes an offline W&B run under `WANDB_DIR`.
 
+The terminal and `artifacts/runpod-pipeline.log` also contain live progress for every expensive
+operation. Typical lines look like:
+
+```text
+prepare:train:  31%|...| 14820/48000 [accepted=12104 records=17882 excluded=2380 rejected=336]
+[2026-08-20T12:10:00+00:00] [tag:train] CHECKPOINT attempted=5000 remaining=37120
+epoch 2/4: 64%|...| 820/1280 [step=742 loss=0.1842 main=0.1661 filler=0.1205]
+[2026-08-20T18:31:00+00:00] [pipeline:train_e5] COMPLETE elapsed_seconds=5142
+```
+
+Hugging Face streaming metadata supplies the preparation denominator when the dataset publishes its
+split count. All manifest-backed stages have exact totals. Progress events never include API keys or
+transcripts.
+
 The pipeline can be bounded or restarted at a stage:
 
 ```bash

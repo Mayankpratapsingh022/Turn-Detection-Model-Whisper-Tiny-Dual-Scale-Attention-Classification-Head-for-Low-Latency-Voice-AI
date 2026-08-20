@@ -4,7 +4,7 @@ import hashlib
 import json
 import re
 from collections import Counter
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Sized
 from contextlib import suppress
 from dataclasses import asdict
 from pathlib import Path
@@ -26,6 +26,7 @@ from turn_detector.data.duplicates import acoustic_fingerprint, duplicate_group,
 from turn_detector.data.records import AudioRecord, read_manifest, write_json, write_manifest
 from turn_detector.data.sampling import category_weight
 from turn_detector.data.splits import assert_no_group_leakage, assign_grouped_stratified_splits
+from turn_detector.progress import log_event, progress_bar
 
 SAFE_ID = re.compile(r"[^A-Za-z0-9_.-]+")
 
@@ -41,12 +42,12 @@ def _optional_bool(value: Any) -> bool | None:
     return None if value is None else bool(value)
 
 
-def iter_huggingface_rows(
+def _huggingface_rows_and_total(
     repo_id: str,
     split: str = "train",
     *,
     revision: str | None = None,
-) -> Iterator[dict[str, Any]]:
+) -> tuple[Iterator[dict[str, Any]], int | None]:
     try:
         from datasets import Audio, load_dataset
     except ImportError as exc:  # pragma: no cover - optional dependency
@@ -56,7 +57,21 @@ def iter_huggingface_rows(
     with suppress(AttributeError, TypeError, ValueError):
         dataset = dataset.cast_column("audio", Audio(decode=False))
         # Older/newer datasets releases can already expose undecoded mappings.
-    yield from dataset
+    total = None
+    with suppress(AttributeError, KeyError, TypeError):
+        split_info = dataset.info.splits[split]
+        total = int(split_info.num_examples)
+    return iter(dataset), total
+
+
+def iter_huggingface_rows(
+    repo_id: str,
+    split: str = "train",
+    *,
+    revision: str | None = None,
+) -> Iterator[dict[str, Any]]:
+    rows, _total = _huggingface_rows_and_total(repo_id, split, revision=revision)
+    yield from rows
 
 
 def _relative_audio_path(output_dir: Path, repo_id: str, record_id: str) -> Path:
@@ -262,32 +277,63 @@ def prepare_dataset(
     )
     output_dir = config.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
-    source_rows = (
-        rows
-        if rows is not None
-        else iter_huggingface_rows(source_repo, config.split, revision=source_revision)
-    )
+    if rows is None:
+        source_rows, source_total = _huggingface_rows_and_total(
+            source_repo, config.split, revision=source_revision
+        )
+    else:
+        source_rows = iter(rows)
+        source_total = len(rows) if isinstance(rows, Sized) else None
 
     records: list[AudioRecord] = []
     audit_counts: Counter[str] = Counter()
     audit_failures: list[dict[str, Any]] = []
     accepted_parents = 0
-    for row in source_rows:
-        if config.limit is not None and accepted_parents >= config.limit:
-            break
-        prepared, audit = _prepare_row(
-            row,
-            config=config,
-            source_repo=source_repo,
-            output_dir=output_dir,
-            forced_split=forced_split,
-        )
-        audit_counts[str(audit["status"])] += 1
-        if audit["status"] not in {"ok", "excluded_language"} and len(audit_failures) < 1_000:
-            audit_failures.append(audit)
-        if prepared:
-            accepted_parents += 1
-            records.extend(prepared)
+    rows_seen = 0
+    role = "test" if forced_split == "test" else "train"
+    stage = f"prepare:{role}"
+    log_event(
+        stage,
+        "START",
+        repo=source_repo,
+        revision=source_revision or "main",
+        source_rows=source_total or "unknown",
+        accepted_limit=config.limit or "none",
+        output=output_dir,
+    )
+    with progress_bar(
+        source_rows,
+        total=source_total,
+        description=stage,
+        unit="rows",
+    ) as progress:
+        for row in progress:
+            if config.limit is not None and accepted_parents >= config.limit:
+                break
+            rows_seen += 1
+            prepared, audit = _prepare_row(
+                row,
+                config=config,
+                source_repo=source_repo,
+                output_dir=output_dir,
+                forced_split=forced_split,
+            )
+            status = str(audit["status"])
+            audit_counts[status] += 1
+            if status not in {"ok", "excluded_language"} and len(audit_failures) < 1_000:
+                audit_failures.append(audit)
+            if prepared:
+                accepted_parents += 1
+                records.extend(prepared)
+            if rows_seen % 25 == 0:
+                rejected = rows_seen - audit_counts["ok"] - audit_counts["excluded_language"]
+                progress.set_postfix(
+                    accepted=accepted_parents,
+                    records=len(records),
+                    excluded=audit_counts["excluded_language"],
+                    rejected=rejected,
+                    refresh=False,
+                )
 
     if forced_split is None:
         records = assign_grouped_stratified_splits(
@@ -318,6 +364,20 @@ def prepare_dataset(
     }
     slug = source_repo.replace("/", "__")
     write_json(summary, output_dir / f"audit__{slug}.json")
+    log_event(
+        stage,
+        "COMPLETE",
+        rows_seen=rows_seen,
+        accepted_parents=accepted_parents,
+        derived_records=len(records),
+        excluded_language=audit_counts["excluded_language"],
+        rejected=sum(
+            count
+            for status, count in audit_counts.items()
+            if status not in {"ok", "excluded_language"}
+        ),
+        manifests=",".join(manifests),
+    )
     return summary
 
 
@@ -342,6 +402,7 @@ def remove_cross_corpus_duplicates(
 
 
 def prepare_train_and_test(config: DataConfig) -> dict[str, Any]:
+    log_event("prepare", "PIPELINE_START", output=config.output_dir)
     train_summary = prepare_dataset(config, repo_id=config.train_repo)
     test_summary = prepare_dataset(config, repo_id=config.test_repo, forced_split="test")
     if config.cache_audio:
@@ -360,6 +421,13 @@ def prepare_train_and_test(config: DataConfig) -> dict[str, Any]:
             test_summary["records"] = summarize_records(test_records)
             slug = config.test_repo.replace("/", "__")
             write_json(test_summary, config.output_dir / f"audit__{slug}.json")
+            log_event("prepare:dedup", "COMPLETE", **cross_split)
+    log_event(
+        "prepare",
+        "PIPELINE_COMPLETE",
+        train_parents=train_summary["accepted_parent_utterances"],
+        test_parents=test_summary["accepted_parent_utterances"],
+    )
     return {"train": train_summary, "test": test_summary}
 
 

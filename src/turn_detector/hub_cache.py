@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from turn_detector.config import AppConfig
+from turn_detector.progress import log_event
 
 
 def _resolved_revision(snapshot_path: str) -> str:
@@ -48,8 +49,21 @@ def cache_huggingface_assets(
     if not requests:
         raise ValueError("At least one asset group must be selected")
 
+    log_event(
+        "cache",
+        "START",
+        assets=len(requests),
+        cache_dir=selected_cache or os.getenv("HF_HOME") or "huggingface-default",
+    )
     cached: list[dict[str, Any]] = []
     for repo_id, repo_type, revision, role in requests:
+        log_event(
+            f"cache:{role}",
+            "DOWNLOAD_START",
+            repo=repo_id,
+            repo_type=repo_type,
+            revision=revision or "main",
+        )
         snapshot_path = snapshot_download(
             repo_id=repo_id,
             repo_type=repo_type,
@@ -67,6 +81,12 @@ def cache_huggingface_assets(
                 "snapshot_path": snapshot_path,
             }
         )
+        log_event(
+            f"cache:{role}",
+            "DOWNLOAD_COMPLETE",
+            resolved_revision=_resolved_revision(snapshot_path),
+            snapshot=snapshot_path,
+        )
 
     result = {
         "created_at_utc": datetime.now(UTC).isoformat(),
@@ -76,6 +96,7 @@ def cache_huggingface_assets(
     }
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     manifest_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
+    log_event("cache", "COMPLETE", assets=len(cached), manifest=manifest_path)
     return result
 
 
@@ -117,9 +138,11 @@ def pin_config_to_cached_revisions(
         }
     )
     pinned.to_yaml(output_path)
-    return {
+    result = {
         "output_path": str(output_path),
         "train_revision": pinned.data.train_revision,
         "test_revision": pinned.data.test_revision,
         "base_model_revision": pinned.model.base_model_revision,
     }
+    log_event("cache:pin-config", "COMPLETE", **result)
+    return result

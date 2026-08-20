@@ -9,6 +9,7 @@ import numpy as np
 from turn_detector.config import PolicyConfig
 from turn_detector.features import WhisperTurnFeatureExtractor
 from turn_detector.modeling import load_turn_model
+from turn_detector.progress import log_event, progress_bar
 from turn_detector.training.dataset import TurnAudioDataset
 
 
@@ -32,12 +33,20 @@ def _calibration_reader(
         def __init__(self) -> None:
             self.indices = list(range(min(max_samples, len(dataset))))
             self.position = 0
+            self.progress = progress_bar(
+                total=len(self.indices),
+                description="export INT8 calibration",
+                unit="clips",
+            )
 
         def get_next(self) -> dict[str, np.ndarray] | None:
             if self.position >= len(self.indices):
                 return None
             example = dataset[self.indices[self.position]]
             self.position += 1
+            self.progress.update(1)
+            if self.position >= len(self.indices):
+                self.progress.close()
             features = extractor(example["audio"], return_tensors="np")
             return {
                 "input_features": np.asarray(features.input_features, dtype=np.float32),
@@ -65,7 +74,18 @@ def export_onnx(
     except ImportError as exc:  # pragma: no cover
         raise RuntimeError("ONNX export requires the train extra") from exc
 
+    log_event(
+        "export",
+        "START",
+        checkpoint=model_path,
+        output=output_path,
+        opset=opset,
+        quantize=quantize,
+        calibration_samples=calibration_samples if calibration_manifest else 0,
+    )
+    log_event("export:model", "LOAD_START")
     model = load_turn_model(model_path).cpu().eval()
+    log_event("export:model", "LOAD_COMPLETE")
 
     class ExportWrapper(torch.nn.Module):
         def __init__(self, inner: Any) -> None:
@@ -89,6 +109,7 @@ def export_onnx(
     with torch.inference_mode():
         expected = wrapper(dummy_features, dummy_mask).numpy()
         batch_one_expected = wrapper(batch_one_features, batch_one_mask).numpy()
+    log_event("export:fp32", "ONNX_EXPORT_START")
     torch.onnx.export(
         wrapper,
         (dummy_features, dummy_mask),
@@ -104,6 +125,7 @@ def export_onnx(
         do_constant_folding=True,
         dynamo=False,
     )
+    log_event("export:fp32", "ONNX_EXPORT_COMPLETE", size_bytes=target.stat().st_size)
 
     try:
         import onnx
@@ -134,6 +156,11 @@ def export_onnx(
     )
     if fp32_max_difference >= 0.01:
         raise RuntimeError(f"PyTorch/ONNX parity failed: max difference {fp32_max_difference}")
+    log_event(
+        "export:fp32",
+        "PARITY_COMPLETE",
+        max_probability_difference=f"{fp32_max_difference:.8f}",
+    )
 
     quantized_path: Path | None = None
     int8_max_difference: float | None = None
@@ -143,6 +170,12 @@ def export_onnx(
         quantized_path = target.with_name(f"{target.stem}.int8{target.suffix}")
         parity_inputs: list[dict[str, np.ndarray]] = []
         if calibration_manifest is not None:
+            log_event(
+                "export:int8",
+                "STATIC_QUANTIZATION_START",
+                manifest=calibration_manifest,
+                max_samples=calibration_samples,
+            )
             from onnxruntime.quantization import (
                 CalibrationMethod,
                 QuantFormat,
@@ -189,6 +222,7 @@ def export_onnx(
                 parity_inputs.append(batch)
             quantization_method = "static_qdq_entropy"
         else:
+            log_event("export:int8", "DYNAMIC_QUANTIZATION_START")
             from onnxruntime.quantization import QuantType, quantize_dynamic
 
             quantize_dynamic(
@@ -216,6 +250,15 @@ def export_onnx(
         if differences:
             int8_max_difference = float(np.max(differences))
             int8_mean_difference = float(np.mean(differences))
+        log_event(
+            "export:int8",
+            "QUANTIZATION_COMPLETE",
+            method=quantization_method,
+            size_bytes=quantized_path.stat().st_size,
+            max_probability_difference=(
+                f"{int8_max_difference:.8f}" if int8_max_difference is not None else "unknown"
+            ),
+        )
 
     metadata = {
         "turn_detector_config": model.turn_config.model_dump(mode="json"),
@@ -255,5 +298,13 @@ def export_onnx(
     }
     (target.parent / "export_report.json").write_text(
         json.dumps(report, indent=2), encoding="utf-8"
+    )
+    log_event(
+        "export",
+        "COMPLETE",
+        fp32=target,
+        int8=quantized_path,
+        meets_10mb_target=report["meets_10mb_target"],
+        report=target.parent / "export_report.json",
     )
     return report

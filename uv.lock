@@ -825,6 +825,7 @@ dependencies = [
     { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
     { name = "scipy", version = "1.18.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
     { name = "soundfile" },
+    { name = "tqdm" },
     { name = "typer" },
 ]
 
@@ -911,6 +912,7 @@ requires-dist = [
     { name = "scipy", specifier = ">=1.13,<2" },
     { name = "soundfile", specifier = ">=0.12.1,<1" },
     { name = "torch", marker = "extra == 'train'", specifier = ">=2.5,<3" },
+    { name = "tqdm", specifier = ">=4.67,<5" },
     { name = "transformers", marker = "extra == 'baselines'", specifier = ">=4.47,<5" },
     { name = "transformers", marker = "extra == 'runtime'", specifier = ">=4.47,<5" },
     { name = "transformers", marker = "extra == 'train'", specifier = ">=4.47,<5" },

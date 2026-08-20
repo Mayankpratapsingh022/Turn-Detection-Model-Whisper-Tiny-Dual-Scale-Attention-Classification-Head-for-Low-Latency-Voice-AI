@@ -5,8 +5,9 @@ import os
 import platform
 import time
 from collections import defaultdict
+from itertools import islice
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 import numpy as np
 
@@ -24,6 +25,11 @@ from turn_detector.evaluation.metrics import (
     policy_sweep,
 )
 from turn_detector.inference import TurnDetector
+from turn_detector.progress import log_event, progress_bar
+
+
+class AudioScorer(Protocol):
+    def score(self, audio: np.ndarray, sample_rate: int) -> Any: ...
 
 
 def _slice_names(record: AudioRecord) -> list[str]:
@@ -53,16 +59,29 @@ def _slice_names(record: AudioRecord) -> list[str]:
 
 
 def score_manifest(
-    detector: TurnDetector,
+    detector: AudioScorer,
     manifest_path: str | Path,
     *,
     limit: int | None = None,
+    progress_description: str = "score manifest",
 ) -> list[dict[str, Any]]:
+    manifest = Path(manifest_path)
+    with manifest.open("r", encoding="utf-8") as handle:
+        total = sum(1 for line in handle if line.strip())
+    if limit is not None:
+        total = min(total, limit)
     scored: list[dict[str, Any]] = []
-    for index, record in enumerate(read_manifest(manifest_path)):
-        if limit is not None and index >= limit:
-            break
-        waveform, sample_rate = load_audio(record.resolved_audio_path(manifest_path))
+    record_source = read_manifest(manifest)
+    if limit is not None:
+        record_source = islice(record_source, limit)
+    records = progress_bar(
+        record_source,
+        total=total,
+        description=progress_description,
+        unit="clips",
+    )
+    for record in records:
+        waveform, sample_rate = load_audio(record.resolved_audio_path(manifest))
         prediction = detector.score(waveform[-record.valid_samples :], sample_rate)
         scored.append(
             {
@@ -153,24 +172,31 @@ def _robustness_suite(
     ]
     selected = records[:limit]
     results: dict[str, Any] = {}
-    for corruption in corruption_names:
-        labels: list[int] = []
-        probabilities: list[float] = []
-        for index, record in enumerate(selected):
-            waveform, sample_rate = load_audio(record.resolved_audio_path(manifest_path))
-            semantic = waveform[-record.valid_samples :]
-            corrupted = apply_corruption(
-                semantic,
-                corruption,  # type: ignore[arg-type]
-                sample_rate=sample_rate,
-                seed=seed + index,
-            )
-            labels.append(record.label)
-            probabilities.append(detector.score(corrupted, sample_rate).probability)
-        if len(set(labels)) == 2:
-            results[corruption] = binary_classification_metrics(
-                labels, probabilities, threshold=threshold
-            )
+    with progress_bar(
+        total=len(corruption_names) * len(selected),
+        description="evaluation robustness",
+        unit="scores",
+    ) as progress:
+        for corruption in corruption_names:
+            labels: list[int] = []
+            probabilities: list[float] = []
+            progress.set_postfix(corruption=corruption, refresh=False)
+            for index, record in enumerate(selected):
+                waveform, sample_rate = load_audio(record.resolved_audio_path(manifest_path))
+                semantic = waveform[-record.valid_samples :]
+                corrupted = apply_corruption(
+                    semantic,
+                    corruption,  # type: ignore[arg-type]
+                    sample_rate=sample_rate,
+                    seed=seed + index,
+                )
+                labels.append(record.label)
+                probabilities.append(detector.score(corrupted, sample_rate).probability)
+                progress.update(1)
+            if len(set(labels)) == 2:
+                results[corruption] = binary_classification_metrics(
+                    labels, probabilities, threshold=threshold
+                )
     return results
 
 
@@ -183,9 +209,23 @@ def evaluate(
     run_robustness: bool = True,
 ) -> dict[str, Any]:
     manifest = Path(manifest_path or config.evaluation.test_manifest)
+    log_event(
+        "evaluation",
+        "START",
+        model=model_path,
+        manifest=manifest,
+        limit=limit or "none",
+        robustness=run_robustness,
+        bootstrap_samples=config.evaluation.bootstrap_samples,
+    )
     detector = TurnDetector(model_path)
     policy = detector.policy
-    scored = score_manifest(detector, manifest, limit=limit)
+    scored = score_manifest(
+        detector,
+        manifest,
+        limit=limit,
+        progress_description="evaluation candidate",
+    )
     if not scored:
         raise ValueError("Evaluation manifest is empty")
     labels = [row["label"] for row in scored]
@@ -194,6 +234,13 @@ def evaluate(
         labels, probabilities, threshold=policy.threshold
     )
     if len({row["parent_id"] for row in scored}) >= 2 and len(set(labels)) == 2:
+        log_event(
+            "evaluation:bootstrap",
+            "START",
+            groups=len({row["parent_id"] for row in scored}),
+            samples=config.evaluation.bootstrap_samples,
+            metrics=3,
+        )
         groups = [row["parent_id"] for row in scored]
         static["group_bootstrap_95ci"] = {
             metric: bootstrap_metric(
@@ -207,6 +254,7 @@ def evaluate(
             )
             for metric in ("f1", "false_cutoff_rate", "auroc")
         }
+        log_event("evaluation:bootstrap", "COMPLETE")
 
     causal = _causal_predictions(scored)
     sweep = (
@@ -262,6 +310,13 @@ def evaluate(
         if run_robustness
         else {}
     )
+    if run_robustness:
+        log_event(
+            "evaluation:robustness",
+            "COMPLETE",
+            corruptions=len(robustness),
+            examples=min(config.evaluation.robustness_limit_per_slice, len(records)),
+        )
     report = {
         "model_path": str(model_path),
         "manifest": str(manifest),
@@ -304,6 +359,15 @@ def evaluate(
         for result in sweep:
             handle.write(json.dumps(result.as_dict()))
             handle.write("\n")
+    log_event(
+        "evaluation",
+        "COMPLETE",
+        examples=len(scored),
+        causal_predictions=len(causal),
+        policy_sweep_points=len(sweep),
+        slices=len(report["slices"]),
+        output=output_dir / "evaluation_report.json",
+    )
     return report
 
 

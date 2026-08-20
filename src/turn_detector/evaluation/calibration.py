@@ -18,6 +18,7 @@ from turn_detector.evaluation.metrics import (
     tpr_at_fpr,
 )
 from turn_detector.inference import TurnDetector
+from turn_detector.progress import log_event
 
 
 def probability_to_logit(probability: float) -> float:
@@ -146,8 +147,21 @@ def calibrate(
     limit: int | None = None,
 ) -> dict[str, Any]:
     manifest = Path(manifest_path or config.train.validation_manifest)
+    log_event(
+        "calibration",
+        "START",
+        model=model_path,
+        manifest=manifest,
+        target_false_cutoff_rate=target_false_cutoff_rate,
+        limit=limit or "none",
+    )
     detector = TurnDetector(model_path, policy=config.policy)
-    scored = score_manifest(detector, manifest, limit=limit)
+    scored = score_manifest(
+        detector,
+        manifest,
+        limit=limit,
+        progress_description="calibration validation",
+    )
     policy, report = select_policy_from_scored(
         scored,
         config,
@@ -168,4 +182,15 @@ def calibrate(
         "policy_path": str(destination),
     }
     write_json(report, destination.with_name("calibration_report.json"))
+    log_event(
+        "calibration",
+        "COMPLETE",
+        examples=report["examples"],
+        causal_predictions=report["causal_pause_predictions"],
+        temperature=f"{policy.temperature:.5f}",
+        threshold=f"{policy.threshold:.5f}",
+        min_silence_ms=policy.min_silence_ms,
+        timeout_ms=policy.timeout_ms,
+        output=destination,
+    )
     return report

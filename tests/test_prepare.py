@@ -2,6 +2,7 @@ from io import BytesIO
 from pathlib import Path
 
 import numpy as np
+import pytest
 import soundfile as sf
 
 from turn_detector.config import DataConfig
@@ -23,7 +24,9 @@ def encoded_audio(*, pause: bool = False, sample_rate: int = 16_000) -> bytes:
     return buffer.getvalue()
 
 
-def test_prepare_filters_languages_and_builds_causal_examples(tmp_path: Path) -> None:
+def test_prepare_filters_languages_and_builds_causal_examples(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     rows = [
         {
             "id": "hin-pause",
@@ -70,3 +73,8 @@ def test_prepare_filters_languages_and_builds_causal_examples(tmp_path: Path) ->
     parent = next(record for record in records if record.id == "hin-pause")
     assert causal[0].duplicate_group == parent.duplicate_group
     assert all(record.resolved_audio_path(tmp_path / "test.jsonl").exists() for record in records)
+    captured = capsys.readouterr()
+    progress_output = captured.out + captured.err
+    assert "[prepare:test] START" in progress_output
+    assert "[prepare:test] COMPLETE" in progress_output
+    assert "rows_seen=3" in progress_output

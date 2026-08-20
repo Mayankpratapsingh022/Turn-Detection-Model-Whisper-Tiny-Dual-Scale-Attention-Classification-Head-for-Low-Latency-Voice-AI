@@ -7,6 +7,8 @@ import shutil
 from pathlib import Path
 from typing import Any
 
+from turn_detector.progress import log_event
+
 
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
@@ -38,6 +40,14 @@ def stage_model_release(
     model_card: Path | None = None,
 ) -> dict[str, Any]:
     """Assemble a self-contained Hub folder without optimizer state or source audio."""
+    log_event(
+        "package",
+        "START",
+        checkpoint=checkpoint_dir,
+        export_dir=export_dir,
+        evaluation_dir=evaluation_dir,
+        output=output_dir,
+    )
     repository_root = Path(__file__).resolve().parents[2]
     checkpoint_config = _first_existing(
         (checkpoint_dir / "turn_detector_config.json",), "checkpoint model config"
@@ -109,7 +119,15 @@ def stage_model_release(
     }
     manifest_path = output_dir / "release_manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
-    return {"release_dir": str(output_dir), **manifest}
+    result = {"release_dir": str(output_dir), **manifest}
+    log_event(
+        "package",
+        "COMPLETE",
+        files=len(copied),
+        total_bytes=sum(int(entry["size_bytes"]) for entry in copied),
+        manifest=manifest_path,
+    )
+    return result
 
 
 def push_model_to_hub(

@@ -4,6 +4,7 @@ import json
 import math
 import random
 import shutil
+import time
 from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,7 @@ from turn_detector.evaluation.metrics import (
     tpr_at_fpr,
 )
 from turn_detector.modeling import create_turn_model
+from turn_detector.progress import log_event, progress_bar
 from turn_detector.tracking import ExperimentTracker, initialize_tracker
 from turn_detector.training.dataset import TurnAudioDataset, TurnCollator
 
@@ -98,6 +100,7 @@ def evaluate_model(
     device: Any,
     precision: str,
     evaluation_config: EvaluationConfig | None = None,
+    progress_description: str | None = None,
 ) -> dict[str, Any]:
     torch, _ = _require_training_dependencies()
     was_training = model.training
@@ -106,8 +109,19 @@ def evaluate_model(
     labels: list[int] = []
     losses: list[float] = []
     causal_predictions: list[PausePrediction] = []
+    batches = (
+        progress_bar(
+            loader,
+            total=len(loader),
+            description=progress_description,
+            unit="batch",
+            leave=False,
+        )
+        if progress_description is not None
+        else loader
+    )
     with torch.inference_mode():
-        for batch in loader:
+        for batch in batches:
             with _autocast_context(torch, device, precision):
                 output = model(
                     input_features=batch["input_features"].to(device),
@@ -217,13 +231,26 @@ def _training_loss_metrics(output: dict[str, Any], optimizer: Any, epoch: int) -
 
 
 def _train_impl(config: AppConfig, tracker: ExperimentTracker) -> dict[str, Any]:
+    training_started = time.perf_counter()
     torch, get_cosine_schedule_with_warmup = _require_training_dependencies()
     set_seed(config.train.seed)
     device = _device(torch)
     output_dir = config.train.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
     config.to_yaml(output_dir / "resolved_config.yaml")
+    log_event(
+        "train",
+        "START",
+        output=output_dir,
+        device=device,
+        epochs=config.train.epochs,
+        physical_batch=config.train.physical_batch_size,
+        effective_batch=config.train.effective_batch_size,
+        precision=config.train.mixed_precision,
+        tracker=type(tracker).__name__,
+    )
 
+    log_event("train:data", "LOAD_START", train=config.train.train_manifest)
     train_dataset = TurnAudioDataset(
         config.train.train_manifest,
         config.model,
@@ -244,10 +271,37 @@ def _train_impl(config: AppConfig, tracker: ExperimentTracker) -> dict[str, Any]
     validation_loader = _make_loader(validation_dataset, config, training=False)
     if len(train_loader) == 0:
         raise ValueError("Training set is smaller than the physical batch size")
+    log_event(
+        "train:data",
+        "LOAD_COMPLETE",
+        train_examples=len(train_dataset),
+        validation_examples=len(validation_dataset),
+        train_batches=len(train_loader),
+        validation_batches=len(validation_loader),
+        workers=config.train.num_workers,
+    )
 
+    log_event(
+        "train:model",
+        "LOAD_START",
+        base_model=config.model.base_model,
+        revision=config.model.base_model_revision or "main",
+        architecture=config.model.architecture,
+    )
     model = create_turn_model(config.model)
     model.freeze_encoder(config.train.freeze_encoder_steps > 0)
     model.to(device)
+    total_parameters = sum(parameter.numel() for parameter in model.parameters())
+    trainable_parameters = sum(
+        parameter.numel() for parameter in model.parameters() if parameter.requires_grad
+    )
+    log_event(
+        "train:model",
+        "LOAD_COMPLETE",
+        total_parameters=f"{total_parameters:,}",
+        trainable_parameters=f"{trainable_parameters:,}",
+        encoder_frozen=config.train.freeze_encoder_steps > 0,
+    )
     optimizer = torch.optim.AdamW(
         model.parameter_groups(
             encoder_learning_rate=config.train.encoder_learning_rate,
@@ -265,6 +319,17 @@ def _train_impl(config: AppConfig, tracker: ExperimentTracker) -> dict[str, Any]
     total_steps = optimizer_steps_per_epoch * config.train.epochs
     warmup_steps = round(total_steps * config.train.warmup_ratio)
     scheduler = get_cosine_schedule_with_warmup(optimizer, warmup_steps, total_steps)
+    log_event(
+        "train:schedule",
+        "READY",
+        optimizer_steps_per_epoch=optimizer_steps_per_epoch,
+        total_optimizer_steps=total_steps,
+        warmup_steps=warmup_steps,
+        accumulation_steps=config.train.gradient_accumulation_steps,
+        eval_every=config.train.eval_steps,
+        save_every=config.train.save_steps,
+        log_every=config.train.log_every_steps,
+    )
 
     global_step = 0
     best_score = -float("inf")
@@ -274,95 +339,171 @@ def _train_impl(config: AppConfig, tracker: ExperimentTracker) -> dict[str, Any]
     optimizer.zero_grad(set_to_none=True)
     model.train()
     should_stop = False
+    encoder_is_frozen = config.train.freeze_encoder_steps > 0
     for epoch in range(config.train.epochs):
-        for batch_index, batch in enumerate(train_loader):
-            if global_step == config.train.freeze_encoder_steps:
-                model.freeze_encoder(False)
-            with _autocast_context(torch, device, config.train.mixed_precision):
-                output = model(
-                    input_features=batch["input_features"].to(device),
-                    frame_mask=batch["frame_mask"].to(device),
-                    labels=batch["labels"].to(device),
-                    filler_labels=batch["filler_labels"].to(device),
+        epoch_started = time.perf_counter()
+        epoch_stage = f"train:epoch-{epoch + 1}"
+        log_event(epoch_stage, "START", batches=len(train_loader), global_step=global_step)
+        with progress_bar(
+            train_loader,
+            total=len(train_loader),
+            description=f"epoch {epoch + 1}/{config.train.epochs}",
+            unit="batch",
+        ) as epoch_progress:
+            for batch_index, batch in enumerate(epoch_progress):
+                if encoder_is_frozen and global_step >= config.train.freeze_encoder_steps:
+                    model.freeze_encoder(False)
+                    encoder_is_frozen = False
+                    log_event("train:model", "ENCODER_UNFROZEN", global_step=global_step)
+                with _autocast_context(torch, device, config.train.mixed_precision):
+                    output = model(
+                        input_features=batch["input_features"].to(device),
+                        frame_mask=batch["frame_mask"].to(device),
+                        labels=batch["labels"].to(device),
+                        filler_labels=batch["filler_labels"].to(device),
+                    )
+                    scaled_loss = output["loss"] / config.train.gradient_accumulation_steps
+                scaler.scale(scaled_loss).backward()
+                should_step = (
+                    batch_index + 1
+                ) % config.train.gradient_accumulation_steps == 0 or batch_index + 1 == len(
+                    train_loader
                 )
-                scaled_loss = output["loss"] / config.train.gradient_accumulation_steps
-            scaler.scale(scaled_loss).backward()
-            should_step = (
-                batch_index + 1
-            ) % config.train.gradient_accumulation_steps == 0 or batch_index + 1 == len(
-                train_loader
-            )
-            if not should_step:
-                continue
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), config.train.max_grad_norm)
-            scaler.step(optimizer)
-            scaler.update()
-            scheduler.step()
-            optimizer.zero_grad(set_to_none=True)
-            global_step += 1
-
-            should_evaluate = global_step % config.train.eval_steps == 0
-            if global_step % config.train.log_every_steps == 0:
+                if not should_step:
+                    continue
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), config.train.max_grad_norm)
+                scaler.step(optimizer)
+                scaler.update()
+                scheduler.step()
+                optimizer.zero_grad(set_to_none=True)
+                global_step += 1
                 training_metrics = _training_loss_metrics(output, optimizer, epoch)
-                history.append({"step": global_step, **training_metrics})
-                tracker.log(training_metrics, step=global_step, commit=not should_evaluate)
-
-            if should_evaluate:
-                metrics = evaluate_model(
-                    model,
-                    validation_loader,
-                    device,
-                    config.train.mixed_precision,
-                    config.evaluation,
+                epoch_progress.set_postfix(
+                    step=global_step,
+                    loss=f"{training_metrics['train/loss']:.4f}",
+                    main=f"{training_metrics.get('train/main_loss', 0.0):.4f}",
+                    filler=f"{training_metrics.get('train/filler_loss', 0.0):.4f}",
+                    lr=f"{optimizer.param_groups[-1]['lr']:.2e}",
+                    refresh=False,
                 )
-                history.append({"step": global_step, "epoch": epoch, "validation": metrics})
-                tracker.log({"validation": metrics}, step=global_step)
-                score = float(metrics["selection_score"])
-                if score > best_score:
-                    best_score = score
-                    best_saved_this_run = True
-                    evaluations_without_improvement = 0
-                    best_dir = output_dir / "best"
-                    if best_dir.exists():
-                        shutil.rmtree(best_dir)
+
+                should_evaluate = global_step % config.train.eval_steps == 0
+                if global_step % config.train.log_every_steps == 0:
+                    history.append({"step": global_step, **training_metrics})
+                    tracker.log(training_metrics, step=global_step, commit=not should_evaluate)
+                    log_event(
+                        "train:metrics",
+                        "STEP",
+                        global_step=global_step,
+                        epoch=epoch + 1,
+                        loss=f"{training_metrics['train/loss']:.5f}",
+                        main_loss=f"{training_metrics.get('train/main_loss', 0.0):.5f}",
+                        filler_loss=f"{training_metrics.get('train/filler_loss', 0.0):.5f}",
+                        encoder_lr=f"{training_metrics.get('train/encoder_learning_rate', 0.0):.3e}",
+                        head_lr=f"{training_metrics.get('train/head_learning_rate', 0.0):.3e}",
+                    )
+
+                if should_evaluate:
+                    log_event("validation", "START", global_step=global_step)
+                    metrics = evaluate_model(
+                        model,
+                        validation_loader,
+                        device,
+                        config.train.mixed_precision,
+                        config.evaluation,
+                        progress_description=f"validation step {global_step}",
+                    )
+                    history.append({"step": global_step, "epoch": epoch, "validation": metrics})
+                    tracker.log({"validation": metrics}, step=global_step)
+                    score = float(metrics["selection_score"])
+                    log_event(
+                        "validation",
+                        "COMPLETE",
+                        global_step=global_step,
+                        loss=f"{metrics['loss']:.5f}",
+                        f1=f"{metrics.get('f1', float('nan')):.5f}",
+                        tpr_at_5pct_fpr=f"{metrics['tpr_at_5pct_fpr']:.5f}",
+                        selection_score=f"{score:.5f}",
+                    )
+                    if score > best_score:
+                        best_score = score
+                        best_saved_this_run = True
+                        evaluations_without_improvement = 0
+                        best_dir = output_dir / "best"
+                        if best_dir.exists():
+                            shutil.rmtree(best_dir)
+                        _save_checkpoint(
+                            model,
+                            optimizer,
+                            scheduler,
+                            scaler,
+                            best_dir,
+                            global_step=global_step,
+                            epoch=epoch,
+                            metrics=metrics,
+                        )
+                        log_event(
+                            "checkpoint",
+                            "BEST_SAVED",
+                            path=best_dir,
+                            global_step=global_step,
+                            selection_score=f"{best_score:.5f}",
+                        )
+                    else:
+                        evaluations_without_improvement += 1
+                        log_event(
+                            "validation",
+                            "NO_IMPROVEMENT",
+                            count=evaluations_without_improvement,
+                            patience=config.train.early_stopping_patience,
+                        )
+                        if evaluations_without_improvement >= config.train.early_stopping_patience:
+                            should_stop = True
+
+                if global_step % config.train.save_steps == 0:
+                    checkpoint_dir = output_dir / f"step-{global_step}"
                     _save_checkpoint(
                         model,
                         optimizer,
                         scheduler,
                         scaler,
-                        best_dir,
+                        checkpoint_dir,
                         global_step=global_step,
                         epoch=epoch,
-                        metrics=metrics,
+                        metrics=history[-1] if history else {},
                     )
-                else:
-                    evaluations_without_improvement += 1
-                    if evaluations_without_improvement >= config.train.early_stopping_patience:
-                        should_stop = True
-
-            if global_step % config.train.save_steps == 0:
-                _save_checkpoint(
-                    model,
-                    optimizer,
-                    scheduler,
-                    scaler,
-                    output_dir / f"step-{global_step}",
-                    global_step=global_step,
-                    epoch=epoch,
-                    metrics=history[-1] if history else {},
-                )
-            if should_stop:
-                break
+                    log_event(
+                        "checkpoint", "PERIODIC_SAVED", path=checkpoint_dir, global_step=global_step
+                    )
+                if should_stop:
+                    break
+        log_event(
+            epoch_stage,
+            "COMPLETE",
+            global_step=global_step,
+            elapsed_seconds=f"{time.perf_counter() - epoch_started:.1f}",
+            early_stop=should_stop,
+        )
         if should_stop:
             break
 
+    log_event("validation:final", "START", global_step=global_step)
     final_metrics = evaluate_model(
         model,
         validation_loader,
         device,
         config.train.mixed_precision,
         config.evaluation,
+        progress_description="final validation",
+    )
+    log_event(
+        "validation:final",
+        "COMPLETE",
+        global_step=global_step,
+        loss=f"{final_metrics['loss']:.5f}",
+        f1=f"{final_metrics.get('f1', float('nan')):.5f}",
+        selection_score=f"{float(final_metrics['selection_score']):.5f}",
     )
     _save_checkpoint(
         model,
@@ -410,6 +551,14 @@ def _train_impl(config: AppConfig, tracker: ExperimentTracker) -> dict[str, Any]
         }
     )
     tracker.log_model_artifact(output_dir / "best")
+    log_event(
+        "train",
+        "COMPLETE",
+        global_step=global_step,
+        best_selection_score=f"{best_score:.5f}",
+        elapsed_seconds=f"{time.perf_counter() - training_started:.1f}",
+        best_checkpoint=output_dir / "best",
+    )
     return result
 
 
@@ -420,7 +569,8 @@ def train(config: AppConfig) -> dict[str, Any]:
     tracker = initialize_tracker(config)
     try:
         result = _train_impl(config, tracker)
-    except BaseException:
+    except BaseException as exc:
+        log_event("train", "FAILED", error_type=type(exc).__name__, error=str(exc))
         tracker.finish(exit_code=1)
         raise
     tracker.finish()

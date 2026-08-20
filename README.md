@@ -159,6 +159,15 @@ Valid stages are `cache`, `prepare`, `tag`, `train_e5`, `mine`, `train_e6`, `exp
 training stage only when you intend to retrain; dataset downloads and ASR tagging reuse their
 cached/resumable state.
 
+Every long-running stage emits timestamped `START`, `CHECKPOINT`, `COMPLETE`, or `FAILED` events and
+live progress bars that remain visible through tmux and in the `tee` log. Preparation reports rows
+seen, accepted parents, derived pause records, language exclusions, rejects, rate, elapsed time, and
+ETA. ASR tagging reports per-split completed/total clips, resume position, Hinglish/Hindi/English
+counts, errors, and manifest checkpoints. Training reports batches, optimizer steps, loss components,
+learning rates, validation progress, early-stopping state, and checkpoint selection. Evaluation,
+robustness scoring, baseline scoring, quantization calibration, and pipeline stage durations use the
+same progress contract. Set `TURN_DETECTOR_PROGRESS=false` only when machine-readable logs are needed.
+
 W&B logs main/filler/combined losses, both learning rates, causal validation operating points,
 selection score, final metrics, runtime configuration, and the best checkpoint as a model artifact.
 Set `WANDB_MODE=offline` if the pod temporarily has no network, then run `wandb sync` later.

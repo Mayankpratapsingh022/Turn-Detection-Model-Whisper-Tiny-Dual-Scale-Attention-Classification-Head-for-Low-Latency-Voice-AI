@@ -34,7 +34,7 @@ def test_plain_languages() -> None:
 
 
 def test_asr_tagging_checkpoints_and_resumes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     class FakeModel:
         def transcribe(self, *_args: object, **_kwargs: object) -> tuple[list[object], None]:
@@ -76,3 +76,7 @@ def test_asr_tagging_checkpoints_and_resumes(
     assert second["processed"] == 1
     assert second["skipped_existing"] == 1
     assert all(record.speech_mix != "untagged" for record in read_manifest(output))
+    captured = capsys.readouterr()
+    progress_output = captured.out + captured.err
+    assert "[tag:train] START" in progress_output
+    assert "[tag:train] CHECKPOINT" in progress_output

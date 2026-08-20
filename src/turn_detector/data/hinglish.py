@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import re
+import time
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
@@ -9,6 +10,7 @@ from typing import Any
 from turn_detector.audio import load_audio
 from turn_detector.data.records import AudioRecord, read_manifest, write_manifest
 from turn_detector.data.sampling import category_weight
+from turn_detector.progress import log_event, progress_bar
 
 DEVANAGARI_RE = re.compile(r"[\u0900-\u097F]+")
 LATIN_RE = re.compile(r"[A-Za-z][A-Za-z'-]*")
@@ -148,55 +150,93 @@ def _tag_with_model(
         raise ValueError("checkpoint_every must be positive")
     counts: dict[str, int] = {}
     processed = 0
-    skipped_existing = 0
+    skipped_existing = sum(
+        record.asr_confidence is not None and record.speech_mix != "untagged" for record in records
+    )
     errors: list[dict[str, str]] = []
-    for index, record in enumerate(records):
-        if record.asr_confidence is not None and record.speech_mix != "untagged":
-            skipped_existing += 1
-            continue
-        if limit is not None and processed >= limit:
-            break
-        try:
-            audio, _sample_rate = load_audio(record.resolved_audio_path(manifest_path))
-            segments, _info = model.transcribe(
-                audio,
-                language="hi" if record.language == "hin" else "en",
-                beam_size=3,
-                vad_filter=False,
-                condition_on_previous_text=False,
-            )
-            materialized = list(segments)
-            text = " ".join(segment.text.strip() for segment in materialized).strip()
-            if materialized:
-                average_logprob = sum(segment.avg_logprob for segment in materialized) / len(
-                    materialized
+    pending = [
+        (index, record)
+        for index, record in enumerate(records)
+        if record.asr_confidence is None or record.speech_mix == "untagged"
+    ]
+    if limit is not None:
+        pending = pending[:limit]
+    split = Path(output_path).name.removesuffix(".tagged.jsonl")
+    stage = f"tag:{split}"
+    log_event(
+        stage,
+        "START",
+        total_records=len(records),
+        already_tagged=skipped_existing,
+        pending=len(pending),
+        checkpoint_every=checkpoint_every,
+        output=output_path,
+    )
+    with progress_bar(
+        pending,
+        total=len(pending),
+        description=stage,
+        unit="clips",
+    ) as progress:
+        for index, record in progress:
+            try:
+                audio, _sample_rate = load_audio(record.resolved_audio_path(manifest_path))
+                segments, _info = model.transcribe(
+                    audio,
+                    language="hi" if record.language == "hin" else "en",
+                    beam_size=3,
+                    vad_filter=False,
+                    condition_on_previous_text=False,
                 )
-                confidence = float(max(0.0, min(1.0, math.exp(average_logprob))))
-            else:
-                confidence = 0.0
-            speech_mix = classify_speech_mix(
-                text,
-                record.language,
-                asr_confidence=confidence,
+                materialized = list(segments)
+                text = " ".join(segment.text.strip() for segment in materialized).strip()
+                if materialized:
+                    average_logprob = sum(segment.avg_logprob for segment in materialized) / len(
+                        materialized
+                    )
+                    confidence = float(max(0.0, min(1.0, math.exp(average_logprob))))
+                else:
+                    confidence = 0.0
+                speech_mix = classify_speech_mix(
+                    text,
+                    record.language,
+                    asr_confidence=confidence,
+                )
+                counts[speech_mix] = counts.get(speech_mix, 0) + 1
+                updated = record.model_copy(
+                    update={
+                        "asr_text": text,
+                        "asr_confidence": confidence,
+                        "speech_mix": speech_mix,
+                    }
+                )
+                records[index] = updated.model_copy(
+                    update={"sampling_weight": category_weight(updated)}
+                )
+                processed += 1
+            except Exception as exc:  # Keep a long tagging job resumable around bad rows.
+                errors.append({"id": record.id, "error": repr(exc)})
+            attempted = processed + len(errors)
+            progress.set_postfix(
+                processed=processed,
+                errors=len(errors),
+                hinglish=counts.get("hinglish_high_confidence", 0),
+                hindi=counts.get("hindi", 0),
+                english=counts.get("english", 0),
+                refresh=False,
             )
-            counts[speech_mix] = counts.get(speech_mix, 0) + 1
-            updated = record.model_copy(
-                update={
-                    "asr_text": text,
-                    "asr_confidence": confidence,
-                    "speech_mix": speech_mix,
-                }
-            )
-            records[index] = updated.model_copy(
-                update={"sampling_weight": category_weight(updated)}
-            )
-            processed += 1
-        except Exception as exc:  # Keep a long tagging job resumable around bad rows.
-            errors.append({"id": record.id, "error": repr(exc)})
-        if (processed + len(errors)) % checkpoint_every == 0:
-            write_manifest(records, output_path)
+            if attempted % checkpoint_every == 0:
+                write_manifest(records, output_path)
+                log_event(
+                    stage,
+                    "CHECKPOINT",
+                    attempted=attempted,
+                    processed=processed,
+                    errors=len(errors),
+                    remaining=max(0, len(pending) - attempted),
+                )
     write_manifest(records, output_path)
-    return {
+    result = {
         "processed": processed,
         "skipped_existing": skipped_existing,
         "remaining_untagged": sum(record.speech_mix == "untagged" for record in records),
@@ -204,6 +244,16 @@ def _tag_with_model(
         "errors": errors[:1_000],
         "output": str(output_path),
     }
+    log_event(
+        stage,
+        "COMPLETE",
+        processed=processed,
+        skipped_existing=skipped_existing,
+        remaining_untagged=result["remaining_untagged"],
+        errors=len(errors),
+        categories=counts,
+    )
+    return result
 
 
 def tag_manifest_with_asr(
@@ -226,7 +276,10 @@ def tag_manifest_with_asr(
             "errors": [],
             "output": str(output_path),
         }
+    log_event("tag:model", "LOAD_START", model=model_name, device=device, precision=compute_type)
+    started = time.perf_counter()
     model = _load_asr_model(model_name, device, compute_type)
+    log_event("tag:model", "LOAD_COMPLETE", elapsed_seconds=f"{time.perf_counter() - started:.1f}")
     return _tag_with_model(
         model,
         manifest_path,
@@ -256,8 +309,23 @@ def tag_prepared_splits_with_asr(
         jobs.append((split, source, output, _resumable_records(source, output)))
     if all(all(record.speech_mix != "untagged" for record in records) for *_, records in jobs):
         return {split: {"processed": 0, "remaining_untagged": 0} for split, *_ in jobs}
+    total_records = sum(len(records) for *_, records in jobs)
+    already_tagged = sum(
+        record.speech_mix != "untagged" for *_, records in jobs for record in records
+    )
+    log_event(
+        "tag",
+        "PIPELINE_START",
+        splits=",".join(splits),
+        total_records=total_records,
+        already_tagged=already_tagged,
+        model=model_name,
+    )
+    log_event("tag:model", "LOAD_START", model=model_name, device=device, precision=compute_type)
+    started = time.perf_counter()
     model = _load_asr_model(model_name, device, compute_type)
-    return {
+    log_event("tag:model", "LOAD_COMPLETE", elapsed_seconds=f"{time.perf_counter() - started:.1f}")
+    result = {
         split: _tag_with_model(
             model,
             source,
@@ -268,6 +336,14 @@ def tag_prepared_splits_with_asr(
         )
         for split, source, output, records in jobs
     }
+    log_event(
+        "tag",
+        "PIPELINE_COMPLETE",
+        processed=sum(int(summary["processed"]) for summary in result.values()),
+        remaining=sum(int(summary["remaining_untagged"]) for summary in result.values()),
+        errors=sum(len(summary["errors"]) for summary in result.values()),
+    )
+    return result
 
 
 def tag_records_from_transcripts(records: Iterable[AudioRecord]) -> list[AudioRecord]:

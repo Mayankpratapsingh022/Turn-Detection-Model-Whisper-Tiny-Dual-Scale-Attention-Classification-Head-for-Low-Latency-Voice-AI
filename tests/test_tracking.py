@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -62,6 +63,7 @@ def test_wandb_tracker_logs_without_serializing_secrets(
         SimpleNamespace(init=fake_init, Artifact=lambda **kwargs: FakeArtifact(**kwargs)),
     )
     monkeypatch.setenv("WANDB_API_KEY", "dummy-secret-that-must-not-be-logged")
+    monkeypatch.setenv("WANDB_RUN_ID", "")
     config = AppConfig().model_copy(
         update={
             "train": AppConfig().train.model_copy(update={"output_dir": tmp_path}),
@@ -77,6 +79,7 @@ def test_wandb_tracker_logs_without_serializing_secrets(
     assert fake_run.summary == {"best": 0.9}
     assert "dummy-secret" not in str(captured_init)
     assert "dummy-secret" not in (tmp_path / "wandb_run.json").read_text()
+    assert "WANDB_RUN_ID" not in os.environ
     assert fake_run.exit_code == 0
 
 
