@@ -1,0 +1,72 @@
+# Methodology and experiment contract
+
+## What the model decides
+
+The detector is called only after the VAD sees a candidate pause. Its output is the probability that the current user turn is complete. Silence detection itself is not the learning problem: a fixed VAD can detect quiet but cannot tell a sentence ending from `haan, ek second...`.
+
+The production policy has four separate quantities:
+
+1. candidate-pause duration before inference;
+2. calibrated completion probability;
+3. completion threshold;
+4. maximum fallback timeout.
+
+Keeping these separate matters. A system that never interrupts but waits 2.4 seconds is safe and unusable; a useful comparison must show latency and interruptions together.
+
+## Data contract
+
+Only the Hindi (`hin`) and English (`eng`) rows from the two Smart Turn v3.2 repositories may enter training, validation, calibration, or the in-domain test. `DataConfig` rejects additional languages.
+
+The pipeline decodes to mono 16 kHz, audits bad audio, removes arbitrary terminal silence, adds exactly 200 ms of candidate silence, keeps the last eight seconds, and left-pads shorter turns. It retains exact hashes and coarse acoustic fingerprints. All crops from one utterance share a duplicate group. Test parents overlapping either training split are removed before evaluation.
+
+The upstream rows do not identify Hinglish. Large-v3 ASR is therefore an offline indexing tool, not a model input. A row receives the high-confidence Hinglish tag only when its log-probability proxy passes the confidence guard and conservative lexical checks find both Hindi and English evidence. Low-recall tagging is acceptable here; contaminating the focus bucket is not. The tagger checkpoints and resumes because redoing a multi-hour ASR pass is avoidable waste.
+
+Internal pauses are causal hard negatives only when the energy segmentation finds later speech of at least 500 ms. A crop ends 200 ms into that pause and is labeled `HOLD`; it never includes the future audio used to prove that the speaker continued.
+
+## Model choice
+
+The backbone is the encoder half of Whisper Tiny. It is small, pretrained on multilingual acoustics, and already has useful prosodic and linguistic structure. The head uses two views:
+
+- masked attention over the complete valid turn;
+- attention, mean, and max pooling over the final 1.5 seconds.
+
+The complete-turn branch carries grammar and long-range context. The final branch carries cadence, hesitation, list continuation, and end fillers. During training, an auxiliary head predicts whether a filler occurs using both global and final embeddings. It is omitted from the ONNX output.
+
+The model is deliberately audio-only at runtime. ASR-derived tags affect sampling and reporting, never inference features.
+
+## Experiment sequence
+
+| Run | Question |
+|---|---|
+| E0 | How much latency is required by fixed 500/800/1200/1600 ms VAD timeouts? |
+| E1 | Does the candidate beat the pinned public Smart Turn v3.2 CPU model on identical rows? |
+| E2 | What does a plain global Whisper encoder learn with uniform sampling? |
+| E3 | Does Hindi/English/filler/Hinglish-focused sampling help the intended slices? |
+| E4 | Does the final-window branch improve the latency/interruption frontier? |
+| E5 | Do causal pauses and filler supervision reduce false cutoffs? |
+| E6 | Does one round of mined high-scoring `HOLD` examples improve the remaining failure set? |
+| E7 | What is lost after held-out static INT8 quantization? |
+
+The best checkpoint is selected on validation endpoint delay subject to at most 5% turn-level false cutoffs. Temperature and policy values are fitted on validation after export. The test set is evaluated once with those frozen values.
+
+## Required evaluation
+
+The primary result is mean and p95 endpoint delay at fixed 5% and 10% false-cutoff budgets. The report must also include:
+
+- F1, balanced accuracy, AUROC, average precision, false-hold rate, Brier score, and ECE;
+- Hindi, English, high-confidence Hinglish, filler, source, real/synthetic, duration, and causal-pause slices;
+- turn-group bootstrap intervals for deployed false-cutoff rate and endpoint delay;
+- paired group-bootstrap delta and McNemar test against Smart Turn v3.2;
+- telephone, μ-law, 5/10/20 dB noise, reverb, speed, gain, and clipping stress tests;
+- FP32/INT8 parity, model size, and fixed-machine p50/p95/p99 CPU latency;
+- independent Hindi/English LiveKit EOT Bench results, kept completely outside training and policy selection.
+
+No model is called “best” because it has the highest accuracy. It is promoted only if its Pareto frontier improves and the intended Hindi/Hinglish/filler slices do not regress materially. If the public baseline wins, that is the result.
+
+## Compute plan
+
+A single A100 40 GB, 16 CPUs, 64 GB RAM, and a 150 GB persistent volume are sufficient. Preparation should run on CPU; ASR tagging, training, and hard-negative mining use the GPU; ONNX export, quantization, and the final CPU benchmark do not need an A100. The full E2–E7 package is budgeted at roughly 12–20 A100-hours. These are estimates until the generated reports contain measured durations.
+
+## Known limits
+
+The Hinglish label is a conservative pseudo-label, not human annotation. Speaker identities are unavailable. Much of the Hindi subset is synthetic. The causal pause generator depends on an energy segmentation heuristic. Audio-only endpointing cannot resolve every semantic ambiguity and does not replace diarization, backchannel detection, or barge-in policy.

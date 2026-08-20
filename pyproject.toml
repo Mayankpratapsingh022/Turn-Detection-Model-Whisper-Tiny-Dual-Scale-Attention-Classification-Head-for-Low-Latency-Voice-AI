@@ -1,0 +1,114 @@
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
+[project]
+name = "hinglish-turn-detector"
+version = "0.1.0"
+description = "Tiny audio-native end-of-turn detection for Hindi, Hinglish, and Indian English"
+readme = "README.md"
+requires-python = ">=3.11,<3.13"
+license = { file = "LICENSE" }
+authors = [{ name = "Hinglish Turn Detector contributors" }]
+dependencies = [
+  "numpy>=1.26,<3",
+  "pydantic>=2.8,<3",
+  "python-dotenv>=1.0,<2",
+  "PyYAML>=6.0.2,<7",
+  "rich>=13.9,<15",
+  "scipy>=1.13,<2",
+  "soundfile>=0.12.1,<1",
+  "typer>=0.15,<1",
+]
+
+[project.optional-dependencies]
+data = [
+  "datasets>=3.2,<5",
+  "faster-whisper>=1.1,<2",
+  "huggingface-hub>=0.27,<2",
+  "pyarrow>=18,<22",
+]
+train = [
+  "accelerate>=1.2,<2",
+  "safetensors>=0.5,<1",
+  "torch>=2.5,<3",
+  "transformers>=4.47,<5",
+]
+tracking = ["wandb>=0.19,<1"]
+hub = ["huggingface-hub>=0.27,<2"]
+eval = [
+  "matplotlib>=3.9,<4",
+  "pandas>=2.2,<3",
+  "scikit-learn>=1.5,<2",
+]
+export = [
+  "onnx>=1.17,<2",
+  "onnxruntime>=1.20,<2",
+]
+runtime = [
+  "huggingface-hub>=0.27,<2",
+  "onnxruntime>=1.20,<2",
+  "transformers>=4.47,<5",
+]
+baselines = [
+  "huggingface-hub>=0.27,<2",
+  "onnxruntime>=1.20,<2",
+  "transformers>=4.47,<5",
+]
+demo = ["gradio>=5.9,<7"]
+cloud = ["modal>=0.67,<2"]
+dev = [
+  "mypy>=1.13,<2",
+  "pytest>=8.3,<10",
+  "pytest-cov>=6,<8",
+  "ruff>=0.8,<1",
+]
+
+[project.scripts]
+turn-detector = "turn_detector.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/turn_detector"]
+
+[tool.pytest.ini_options]
+addopts = "-ra --strict-markers"
+testpaths = ["tests"]
+markers = [
+  "ml: requires torch and transformers",
+  "network: requires internet access",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM", "RUF"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.12"
+warn_unused_configs = true
+disallow_untyped_defs = true
+no_implicit_optional = true
+packages = ["turn_detector"]
+
+[[tool.mypy.overrides]]
+module = [
+  "datasets.*",
+  "faster_whisper.*",
+  "gradio.*",
+  "huggingface_hub.*",
+  "matplotlib.*",
+  "onnx.*",
+  "onnxruntime.*",
+  "pyarrow.*",
+  "safetensors.*",
+  "scipy.*",
+  "soundfile.*",
+  "torch.*",
+  "transformers.*",
+  "wandb.*",
+  "yaml.*",
+]
+ignore_missing_imports = true

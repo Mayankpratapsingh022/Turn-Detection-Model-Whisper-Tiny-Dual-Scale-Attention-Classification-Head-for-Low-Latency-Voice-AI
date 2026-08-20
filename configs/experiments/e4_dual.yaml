@@ -1,0 +1,9 @@
+extends: ../default.yaml
+model:
+  architecture: dual_scale
+  filler_loss_weight: 0.0
+train:
+  output_dir: artifacts/checkpoints/e4_dual
+  train_manifest: artifacts/data/train.tagged.jsonl
+  focused_sampling: true
+  include_causal_pauses: false

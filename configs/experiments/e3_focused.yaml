@@ -1,0 +1,9 @@
+extends: ../default.yaml
+model:
+  architecture: global
+  filler_loss_weight: 0.0
+train:
+  output_dir: artifacts/checkpoints/e3_focused
+  train_manifest: artifacts/data/train.tagged.jsonl
+  focused_sampling: true
+  include_causal_pauses: false

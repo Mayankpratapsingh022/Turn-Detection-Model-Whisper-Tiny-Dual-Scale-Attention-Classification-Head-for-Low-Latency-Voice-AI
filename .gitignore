@@ -1,0 +1,26 @@
+.DS_Store
+.env*
+!.env.example
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.coverage
+htmlcov/
+
+# Large/generated assets
+/artifacts/*
+!artifacts/.gitkeep
+/data/
+/checkpoints/
+/outputs/
+/wandb/
+*.onnx
+*.safetensors
+*.pt
+*.pth

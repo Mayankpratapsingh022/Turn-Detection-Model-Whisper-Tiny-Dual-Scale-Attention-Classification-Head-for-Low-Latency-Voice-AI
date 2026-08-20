@@ -1,0 +1,9 @@
+extends: ../default.yaml
+model:
+  architecture: global
+  filler_loss_weight: 0.0
+train:
+  output_dir: artifacts/checkpoints/e2_global
+  train_manifest: artifacts/data/train.jsonl
+  focused_sampling: false
+  include_causal_pauses: false

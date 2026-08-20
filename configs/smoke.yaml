@@ -1,0 +1,78 @@
+data:
+  train_repo: pipecat-ai/smart-turn-data-v3.2-train
+  test_repo: pipecat-ai/smart-turn-data-v3.2-test
+  train_revision: null
+  test_revision: null
+  split: train
+  languages: [hin, eng]
+  output_dir: artifacts/smoke/data
+  cache_audio: true
+  sample_rate: 16000
+  max_seconds: 8.0
+  trailing_silence_ms: 200
+  validation_fraction: 0.2
+  max_internal_pauses_per_clip: 1
+  min_internal_pause_ms: 150
+  max_internal_pause_ms: 1200
+  min_future_speech_ms: 500
+  seed: 42
+  limit: 64
+
+model:
+  base_model: openai/whisper-tiny
+  base_model_revision: null
+  architecture: dual_scale
+  max_seconds: 8.0
+  sample_rate: 16000
+  n_mels: 80
+  mel_frames: 800
+  trailing_silence_ms: 200
+  tail_seconds: 1.5
+  attention_hidden_size: 64
+  classifier_hidden_size: 64
+  classifier_bottleneck_size: 32
+  dropout: 0.1
+  hold_loss_weight: 2.0
+  filler_loss_weight: 0.15
+
+train:
+  output_dir: artifacts/smoke/checkpoints
+  train_manifest: artifacts/smoke/data/train.jsonl
+  validation_manifest: artifacts/smoke/data/validation.jsonl
+  seed: 42
+  epochs: 1
+  physical_batch_size: 2
+  effective_batch_size: 4
+  num_workers: 0
+  encoder_learning_rate: 0.00001
+  head_learning_rate: 0.0001
+  weight_decay: 0.01
+  warmup_ratio: 0.05
+  max_grad_norm: 1.0
+  freeze_encoder_steps: 0
+  eval_steps: 10
+  save_steps: 10
+  early_stopping_patience: 2
+  mixed_precision: "no"
+  hard_negative_fraction: 0.0
+  focused_sampling: true
+  include_causal_pauses: true
+  log_every_steps: 1
+
+policy:
+  threshold: 0.80
+  temperature: 1.0
+  min_silence_ms: 200
+  timeout_ms: 1600
+  speech_rms_threshold: 0.015
+
+evaluation:
+  test_manifest: artifacts/smoke/data/validation.jsonl
+  output_dir: artifacts/smoke/evaluation
+  target_false_cutoff_rates: [0.05, 0.10]
+  thresholds: [0.25, 0.50, 0.75]
+  action_delays_ms: [200, 300]
+  timeouts_ms: [600, 1000, 1600]
+  bootstrap_samples: 50
+  robustness_limit_per_slice: 16
+  seed: 42

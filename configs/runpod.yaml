@@ -1,0 +1,14 @@
+extends: default.yaml
+
+train:
+  physical_batch_size: 32
+  effective_batch_size: 256
+  num_workers: 8
+  mixed_precision: bf16
+
+tracking:
+  enabled: true
+  project: hinglish-turn-detector
+  mode: online
+  tags: [runpod, whisper-tiny, hinglish, turn-detection]
+  log_best_model_artifact: true
