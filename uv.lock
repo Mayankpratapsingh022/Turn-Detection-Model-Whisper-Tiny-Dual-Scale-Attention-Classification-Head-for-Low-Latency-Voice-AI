@@ -830,6 +830,9 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+asr = [
+    { name = "faster-whisper" },
+]
 baselines = [
     { name = "huggingface-hub" },
     { name = "onnxruntime" },
@@ -840,7 +843,6 @@ cloud = [
 ]
 data = [
     { name = "datasets" },
-    { name = "faster-whisper" },
     { name = "huggingface-hub" },
     { name = "pyarrow" },
 ]
@@ -884,7 +886,7 @@ train = [
 requires-dist = [
     { name = "accelerate", marker = "extra == 'train'", specifier = ">=1.2,<2" },
     { name = "datasets", marker = "extra == 'data'", specifier = ">=3.2,<5" },
-    { name = "faster-whisper", marker = "extra == 'data'", specifier = ">=1.1,<2" },
+    { name = "faster-whisper", marker = "extra == 'asr'", specifier = ">=1.1,<2" },
     { name = "gradio", marker = "extra == 'demo'", specifier = ">=5.9,<7" },
     { name = "huggingface-hub", marker = "extra == 'baselines'", specifier = ">=0.27,<2" },
     { name = "huggingface-hub", marker = "extra == 'data'", specifier = ">=0.27,<2" },
@@ -919,7 +921,7 @@ requires-dist = [
     { name = "typer", specifier = ">=0.15,<1" },
     { name = "wandb", marker = "extra == 'tracking'", specifier = ">=0.19,<1" },
 ]
-provides-extras = ["data", "train", "tracking", "hub", "eval", "export", "runtime", "baselines", "demo", "cloud", "dev"]
+provides-extras = ["data", "asr", "train", "tracking", "hub", "eval", "export", "runtime", "baselines", "demo", "cloud", "dev"]
 
 [[package]]
 name = "hpack"

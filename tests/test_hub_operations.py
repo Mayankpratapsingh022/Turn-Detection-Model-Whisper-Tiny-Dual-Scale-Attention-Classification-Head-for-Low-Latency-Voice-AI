@@ -30,7 +30,7 @@ def test_cache_assets_records_resolved_revisions_without_token(
     destination = tmp_path / "cache_manifest.json"
     result = cache_huggingface_assets(AppConfig(), manifest_path=destination)
 
-    assert len(result["assets"]) == 4
+    assert len(result["assets"]) == 3
     assert result["assets"][0]["resolved_revision"] == "sha-1"
     assert calls[0]["repo_type"] == "dataset"
     assert "dummy-hf-secret" not in destination.read_text()

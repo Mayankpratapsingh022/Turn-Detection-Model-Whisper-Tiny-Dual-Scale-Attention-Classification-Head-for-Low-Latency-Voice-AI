@@ -11,7 +11,7 @@ fi
 
 START_AT="${PIPELINE_START_AT:-cache}"
 STOP_AFTER="${PIPELINE_STOP_AFTER:-package}"
-STAGES=(cache prepare tag train_e5 mine train_e6 export calibrate evaluate baselines package)
+STAGES=(cache prepare train_e5 mine train_e6 export calibrate evaluate baselines package)
 
 stage_index() {
   local requested="$1"
@@ -71,13 +71,11 @@ cache_and_pin() {
 run_stage cache cache_and_pin
 run_stage prepare uv run turn-detector data prepare \
   --config artifacts/configs/runpod.pinned.yaml
-run_stage tag uv run turn-detector data tag-all \
-  --data-dir artifacts/data --model large-v3 --device cuda --compute-type float16
 run_stage train_e5 uv run turn-detector train \
   --config artifacts/configs/e5_causal_filler.pinned.yaml
 run_stage mine uv run turn-detector mine-hard-negatives \
   --model-path artifacts/checkpoints/e5_causal_filler/best \
-  --manifest artifacts/data/train.tagged.jsonl \
+  --manifest artifacts/data/train.jsonl \
   --output artifacts/data/hard_negatives.jsonl \
   --config artifacts/configs/runpod.pinned.yaml
 run_stage train_e6 uv run turn-detector train \

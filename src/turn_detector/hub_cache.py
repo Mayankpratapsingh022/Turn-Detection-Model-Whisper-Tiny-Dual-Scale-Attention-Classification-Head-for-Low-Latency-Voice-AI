@@ -20,7 +20,7 @@ def cache_huggingface_assets(
     *,
     include_datasets: bool = True,
     include_model: bool = True,
-    include_asr: bool = True,
+    include_asr: bool = False,
     cache_dir: Path | None = None,
     manifest_path: Path = Path("artifacts/cache_manifest.json"),
 ) -> dict[str, Any]:

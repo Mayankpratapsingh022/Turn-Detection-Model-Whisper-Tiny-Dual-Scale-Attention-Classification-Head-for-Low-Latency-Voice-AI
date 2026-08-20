@@ -133,7 +133,7 @@ def _load_asr_model(model_name: str, device: str, compute_type: str) -> Any:
     try:
         from faster_whisper import WhisperModel
     except ImportError as exc:  # pragma: no cover - optional dependency
-        raise RuntimeError("ASR tagging requires `uv sync --extra data`") from exc
+        raise RuntimeError("Optional ASR analysis requires `uv sync --extra asr`") from exc
     return WhisperModel(model_name, device=device, compute_type=compute_type)
 
 

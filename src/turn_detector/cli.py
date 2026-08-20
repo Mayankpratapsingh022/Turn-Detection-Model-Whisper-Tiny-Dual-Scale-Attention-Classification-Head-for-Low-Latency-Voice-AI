@@ -119,7 +119,7 @@ def tag_all_hinglish(
     compute_type: Annotated[str, typer.Option()] = "float16",
     checkpoint_every: Annotated[int, typer.Option(min=1)] = 250,
 ) -> None:
-    """Tag train/validation/test in one resumable ASR model session."""
+    """Optionally audit train/validation/test in one resumable ASR session."""
     load_project_env()
     from turn_detector.data.hinglish import tag_prepared_splits_with_asr
 
@@ -164,8 +164,8 @@ def cache_assets_command(
     ] = True,
     asr: Annotated[
         bool,
-        typer.Option("--asr/--no-asr", help="Cache faster-whisper large-v3 for tagging."),
-    ] = True,
+        typer.Option("--asr/--no-asr", help="Optionally cache faster-whisper for ASR analysis."),
+    ] = False,
     cache_dir: Annotated[Path | None, typer.Option(file_okay=False)] = None,
     manifest: Annotated[Path, typer.Option(dir_okay=False)] = Path("artifacts/cache_manifest.json"),
 ) -> None:

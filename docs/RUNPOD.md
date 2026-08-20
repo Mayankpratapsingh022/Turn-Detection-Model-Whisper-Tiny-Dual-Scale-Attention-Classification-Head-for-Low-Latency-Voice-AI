@@ -19,11 +19,11 @@ The default physical batch is 32 and effective batch is 256 through gradient acc
 out-of-memory error, change only `physical_batch_size` in `configs/runpod.yaml` to 16 or 8 and leave
 the effective batch at 256.
 
-Actual wall time depends mostly on pod download bandwidth, total decoded audio duration, ASR speed,
-and GPU type. Budget roughly 8–24 hours for a first complete E5→E6 run including data preparation,
-ASR tagging, evaluation, and export. A repeat run with warm Hugging Face and prepared-audio caches is
-usually much faster. The ASR-tagging and two training stages are the dominant GPU work. Do not rent
-several GPUs: the trainer is deliberately single-GPU, and one fast GPU is the cost-efficient setup.
+Actual wall time depends mostly on pod download bandwidth, total decoded audio duration, and GPU
+type. Training starts directly from the prepared dataset metadata; a full-corpus ASR transcription
+pass is not required. A repeat run with warm Hugging Face and prepared-audio caches is usually much
+faster. The two training stages are the dominant GPU work. Do not rent several GPUs: the trainer is
+deliberately single-GPU, and one fast GPU is the cost-efficient setup.
 
 ## Bootstrap and credentials
 
@@ -70,9 +70,11 @@ reproducible pinned run.
 To cache only a subset:
 
 ```bash
-uv run turn-detector cache-assets --no-datasets --model --asr
-uv run turn-detector cache-assets --datasets --no-model --no-asr
+uv run turn-detector cache-assets --no-datasets --model
+uv run turn-detector cache-assets --datasets --no-model
 ```
+
+`--asr` is an explicit opt-in for exploratory transcript analysis and is not used by training.
 
 ## Run and monitor
 
@@ -97,7 +99,6 @@ operation. Typical lines look like:
 
 ```text
 prepare:train:  31%|...| 14820/48000 [accepted=12104 records=17882 excluded=2380 rejected=336]
-[2026-08-20T12:10:00+00:00] [tag:train] CHECKPOINT attempted=5000 remaining=37120
 epoch 2/4: 64%|...| 820/1280 [step=742 loss=0.1842 main=0.1661 filler=0.1205]
 [2026-08-20T18:31:00+00:00] [pipeline:train_e5] COMPLETE elapsed_seconds=5142
 ```
@@ -109,14 +110,13 @@ transcripts.
 The pipeline can be bounded or restarted at a stage:
 
 ```bash
-PIPELINE_STOP_AFTER=tag bash scripts/runpod_pipeline.sh
 PIPELINE_START_AT=train_e5 PIPELINE_STOP_AFTER=train_e5 bash scripts/runpod_pipeline.sh
 PIPELINE_START_AT=mine bash scripts/runpod_pipeline.sh
 ```
 
-Preparation and ASR tagging are cache/resume aware. The model trainer does not yet reconstruct an
-interrupted optimizer/data-loader position, so a restarted `train_e5` or `train_e6` stage is a clean
-new training run. Checkpoints are still retained for audit and inference.
+Preparation is cache aware. The model trainer does not yet reconstruct an interrupted
+optimizer/data-loader position, so a restarted `train_e5` or `train_e6` stage is a clean new
+training run. Checkpoints are still retained for audit and inference.
 
 ## Promotion gate
 

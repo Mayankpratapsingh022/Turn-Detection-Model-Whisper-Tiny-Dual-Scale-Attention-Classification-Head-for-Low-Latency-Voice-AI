@@ -130,7 +130,7 @@ WANDB_DIR=/workspace/artifacts/wandb
 `.env` is git-ignored. Tokens are read from the environment only and are not put into resolved
 configs, training reports, cache manifests, release manifests, or W&B run configuration.
 
-Prefetch the two supplied datasets, Whisper Tiny, and the offline Hinglish-tagging ASR model:
+Prefetch the two supplied datasets and Whisper Tiny:
 
 ```bash
 uv run turn-detector cache-assets --config configs/runpod.yaml
@@ -145,7 +145,7 @@ cached revisions. The full pipeline is:
 bash scripts/runpod_pipeline.sh
 ```
 
-It runs preparation, resumable ASR tagging, E5 training, hard-negative mining, E6 training, static
+It runs preparation, E5 training, hard-negative mining, E6 training, static
 INT8 export, calibration, the full evaluation suite, baseline comparison, and release packaging.
 It deliberately stops before uploading anything. Restart at a named stage after an interruption:
 
@@ -154,16 +154,14 @@ PIPELINE_START_AT=train_e5 bash scripts/runpod_pipeline.sh
 PIPELINE_START_AT=evaluate PIPELINE_STOP_AFTER=package bash scripts/runpod_pipeline.sh
 ```
 
-Valid stages are `cache`, `prepare`, `tag`, `train_e5`, `mine`, `train_e6`, `export`, `calibrate`,
+Valid stages are `cache`, `prepare`, `train_e5`, `mine`, `train_e6`, `export`, `calibrate`,
 `evaluate`, `baselines`, and `package`. Training itself starts a new optimizer run, so restart a
-training stage only when you intend to retrain; dataset downloads and ASR tagging reuse their
-cached/resumable state.
+training stage only when you intend to retrain; dataset downloads reuse the Hugging Face cache.
 
 Every long-running stage emits timestamped `START`, `CHECKPOINT`, `COMPLETE`, or `FAILED` events and
 live progress bars that remain visible through tmux and in the `tee` log. Preparation reports rows
 seen, accepted parents, derived pause records, language exclusions, rejects, rate, elapsed time, and
-ETA. ASR tagging reports per-split completed/total clips, resume position, Hinglish/Hindi/English
-counts, errors, and manifest checkpoints. Training reports batches, optimizer steps, loss components,
+ETA. Training reports batches, optimizer steps, loss components,
 learning rates, validation progress, early-stopping state, and checkpoint selection. Evaluation,
 robustness scoring, baseline scoring, quantization calibration, and pipeline stage durations use the
 same progress contract. Set `TURN_DETECTOR_PROGRESS=false` only when machine-readable logs are needed.
@@ -209,11 +207,15 @@ For each Hindi/English clip, preparation performs:
 
 Prepared audio is stored as FLAC. Manifest paths are relative, so moving the complete prepared directory preserves reproducibility.
 
-### Offline Hinglish discovery
+### Optional offline Hinglish audit
 
-The source has no transcript or Hinglish field. Tag code-mixed candidates without changing model inputs:
+The source already provides the supervised fields used by the model: `endpoint_bool`, `midfiller`,
+`endfiller`, `language`, and `synthetic`. Training therefore consumes the prepared manifests
+directly and does not require ASR. The source has no separate Hinglish field, so an optional ASR
+audit remains available for exploratory code-switch analysis:
 
 ```bash
+uv sync --extra asr
 uv run turn-detector data tag-all \
   --data-dir artifacts/data \
   --model large-v3 \
@@ -221,12 +223,14 @@ uv run turn-detector data tag-all \
   --compute-type float16
 ```
 
-This loads faster-whisper once, tags train/validation/test, checkpoints every 250 rows, and safely resumes from aligned `.tagged.jsonl` files. A clip is marked `hinglish_high_confidence` only when the ASR average-log-probability proxy is acceptable and the transcript contains credible Hindi and English lexical content. The conservative tag favors precision over recall. Uncertain clips remain ordinary Hindi/English examples.
+This optional command loads faster-whisper once, checkpoints every 250 rows, and safely resumes.
+Its pseudo-labels are not ground truth, are not fed to the turn detector, and are not part of the
+standard RunPod pipeline. Do not run a full-corpus ASR audit merely to begin training.
 
 Inspect any manifest with:
 
 ```bash
-uv run turn-detector data summary artifacts/data/train.tagged.jsonl
+uv run turn-detector data summary artifacts/data/train.jsonl
 ```
 
 ## Experiments and training
@@ -256,7 +260,7 @@ Mine incomplete examples that the model incorrectly considers complete:
 ```bash
 uv run turn-detector mine-hard-negatives \
   --model-path artifacts/checkpoints/e5_causal_filler/best \
-  --manifest artifacts/data/train.tagged.jsonl \
+  --manifest artifacts/data/train.jsonl \
   --output artifacts/data/hard_negatives.jsonl \
   --config configs/default.yaml
 ```
@@ -442,7 +446,6 @@ For a Hugging Face Gradio Space, include the exported ONNX/config/policy files, 
 ```bash
 modal volume create hinglish-turn-data
 modal run infra/modal_app.py::prepare
-modal run infra/modal_app.py::tag_hinglish
 modal run infra/modal_app.py::train_model
 modal run infra/modal_app.py::evaluate_and_export
 ```
@@ -465,9 +468,12 @@ Recommended allocation:
 - 16 CPU cores;
 - 48–64 GB RAM;
 - 150 GB persistent volume;
-- approximately 12–20 A100-hours for tagging, experiments, mining, export, and full evaluation.
+- approximately 8–16 A100-hours for experiments, mining, export, and full evaluation.
 
-Expected wall-clock depends mainly on how many Hindi/English rows survive audit and on ASR throughput. A practical sequence is roughly 1–3 hours for streamed preparation, 2–5 hours for large-v3 ASR tagging, 45–120 minutes per Whisper-Tiny experiment, and 1–3 hours for mining/export/full evaluation. One selected-model run is usually 4–8 hours; the complete E2–E7 evidence package is roughly 12–20 A100-hours. These are planning estimates, not measurements from this repository.
+Expected wall-clock depends mainly on how many Hindi/English rows survive audit and on GPU
+throughput. A practical sequence is roughly 1–3 hours for streamed preparation, 45–120 minutes per
+Whisper-Tiny experiment, and 1–3 hours for mining/export/full evaluation. These are planning
+estimates, not measurements from this repository.
 
 ## Reproducibility and tests
 

@@ -4,7 +4,7 @@ model:
   filler_loss_weight: 0.15
 train:
   output_dir: artifacts/checkpoints/e6_hard_negative
-  train_manifest: artifacts/data/train.tagged.jsonl
+  train_manifest: artifacts/data/train.jsonl
   hard_negative_manifest: artifacts/data/hard_negatives.jsonl
   focused_sampling: true
   include_causal_pauses: true

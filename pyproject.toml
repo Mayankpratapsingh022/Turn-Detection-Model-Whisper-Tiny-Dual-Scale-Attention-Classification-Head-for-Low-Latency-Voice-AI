@@ -25,10 +25,10 @@ dependencies = [
 [project.optional-dependencies]
 data = [
   "datasets>=3.2,<5",
-  "faster-whisper>=1.1,<2",
   "huggingface-hub>=0.27,<2",
   "pyarrow>=18,<22",
 ]
+asr = ["faster-whisper>=1.1,<2"]
 train = [
   "accelerate>=1.2,<2",
   "safetensors>=0.5,<1",

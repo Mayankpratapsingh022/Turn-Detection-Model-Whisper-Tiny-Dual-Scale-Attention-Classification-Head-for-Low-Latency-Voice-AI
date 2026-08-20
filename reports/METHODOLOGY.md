@@ -65,8 +65,14 @@ No model is called “best” because it has the highest accuracy. It is promote
 
 ## Compute plan
 
-A single A100 40 GB, 16 CPUs, 64 GB RAM, and a 150 GB persistent volume are sufficient. Preparation should run on CPU; ASR tagging, training, and hard-negative mining use the GPU; ONNX export, quantization, and the final CPU benchmark do not need an A100. The full E2–E7 package is budgeted at roughly 12–20 A100-hours. These are estimates until the generated reports contain measured durations.
+A single A100 40 GB, 16 CPUs, 64 GB RAM, and a 150 GB persistent volume are sufficient.
+Preparation should run on CPU; training and hard-negative mining use the GPU; ONNX export,
+quantization, and the final CPU benchmark do not need an A100. Full-corpus ASR is not part of the
+training path because the source already provides endpoint and filler labels.
 
 ## Known limits
 
-The Hinglish label is a conservative pseudo-label, not human annotation. Speaker identities are unavailable. Much of the Hindi subset is synthetic. The causal pause generator depends on an energy segmentation heuristic. Audio-only endpointing cannot resolve every semantic ambiguity and does not replace diarization, backchannel detection, or barge-in policy.
+The source has Hindi but no human-annotated Hinglish/code-switch field. Speaker identities are
+unavailable. Much of the Hindi subset is synthetic. The causal pause generator depends on an energy
+segmentation heuristic. Audio-only endpointing cannot resolve every semantic ambiguity and does not
+replace diarization, backchannel detection, or barge-in policy.

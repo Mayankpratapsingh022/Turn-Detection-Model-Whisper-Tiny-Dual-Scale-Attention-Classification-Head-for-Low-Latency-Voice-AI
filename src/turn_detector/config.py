@@ -78,8 +78,8 @@ class ModelConfig(StrictModel):
 
 class TrainConfig(StrictModel):
     output_dir: Path = Path("artifacts/checkpoints")
-    train_manifest: Path = Path("artifacts/data/train.tagged.jsonl")
-    validation_manifest: Path = Path("artifacts/data/validation.tagged.jsonl")
+    train_manifest: Path = Path("artifacts/data/train.jsonl")
+    validation_manifest: Path = Path("artifacts/data/validation.jsonl")
     hard_negative_manifest: Path | None = None
     seed: int = 42
     epochs: int = 4
@@ -146,7 +146,7 @@ class PolicyConfig(StrictModel):
 
 
 class EvaluationConfig(StrictModel):
-    test_manifest: Path = Path("artifacts/data/test.tagged.jsonl")
+    test_manifest: Path = Path("artifacts/data/test.jsonl")
     output_dir: Path = Path("artifacts/evaluation")
     target_false_cutoff_rates: tuple[float, ...] = (0.05, 0.10)
     thresholds: tuple[float, ...] = tuple(round(i / 20, 2) for i in range(1, 20))

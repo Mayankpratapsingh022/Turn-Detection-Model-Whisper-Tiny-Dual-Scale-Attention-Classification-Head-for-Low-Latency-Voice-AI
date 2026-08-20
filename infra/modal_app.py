@@ -27,7 +27,6 @@ image = (
     .pip_install(
         "accelerate>=1.2,<2",
         "datasets>=3.2,<5",
-        "faster-whisper>=1.1,<2",
         "huggingface-hub>=0.27,<2",
         "matplotlib>=3.9,<4",
         "numpy>=1.26,<3",
@@ -90,19 +89,6 @@ def prepare() -> None:
     timeout=24 * 60 * 60,
     volumes={"/vol": volume},
 )
-def tag_hinglish() -> None:
-    _run("data", "tag-all", "--data-dir", "/vol/data")
-    volume.commit()
-
-
-@app.function(
-    image=image,
-    gpu="A100-40GB",
-    cpu=16,
-    memory=65_536,
-    timeout=24 * 60 * 60,
-    volumes={"/vol": volume},
-)
 def train_model() -> None:
     _run("train", "--config", "configs/modal.yaml")
     volume.commit()
@@ -145,7 +131,7 @@ def mine_hard_negatives() -> None:
         "--model-path",
         "/vol/checkpoints/e5_causal_filler/best",
         "--manifest",
-        "/vol/data/train.tagged.jsonl",
+        "/vol/data/train.jsonl",
         "--output",
         "/vol/data/hard_negatives.jsonl",
         "--config",
