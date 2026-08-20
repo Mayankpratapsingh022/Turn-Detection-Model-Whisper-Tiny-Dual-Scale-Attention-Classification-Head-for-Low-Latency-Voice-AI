@@ -43,9 +43,10 @@ def test_tiny_random_model_forward() -> None:
         input_features=torch.randn(2, 80, 8),
         frame_mask=torch.tensor([[0, 0, 1, 1, 1, 1, 1, 1], [1] * 8]),
         labels=torch.tensor([0, 1]),
-        filler_labels=torch.tensor([-1, 1]),
+        filler_labels=torch.tensor([[-1, -1], [1, 0]]),
     )
     assert output["probabilities"].shape == (2,)
+    assert output["filler_logits"].shape == (2, 2)
     assert output["loss"].ndim == 0
 
 

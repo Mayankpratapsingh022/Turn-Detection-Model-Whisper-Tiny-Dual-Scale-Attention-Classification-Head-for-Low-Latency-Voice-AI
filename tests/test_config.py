@@ -11,6 +11,7 @@ def test_default_config_is_valid() -> None:
     assert config.data.languages == ("hin", "eng")
     assert config.train.gradient_accumulation_steps == 8
     assert config.model.architecture == "dual_scale"
+    assert config.train.hindi_sampling_fraction == 0.50
     assert config.tracking.enabled is False
 
 

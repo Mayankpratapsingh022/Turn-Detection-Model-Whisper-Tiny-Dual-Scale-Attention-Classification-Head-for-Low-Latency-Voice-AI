@@ -63,7 +63,9 @@ Whisper-Tiny encoder (four layers, 384 hidden size)
                          calibrated P(EOT)
 ```
 
-The encoder is initialized from `openai/whisper-tiny`; existing Smart Turn endpoint weights are not used to initialize the submitted model. The classifier adds a small auxiliary filler head during training, then discards it for deployment.
+The encoder is initialized from `openai/whisper-tiny`; existing Smart Turn endpoint weights are not
+used to initialize the submitted model. The classifier adds separate auxiliary mid-filler and
+end-filler outputs during training, then discards them for deployment.
 
 ## Installation
 
@@ -275,7 +277,13 @@ Training defaults:
 - four epochs maximum with grouped validation;
 - encoder frozen for the first 500 optimizer steps;
 - `HOLD` errors weighted 2×;
+- manifest-derived sampling mass of 50% Hindi and 50% English, with base COMPLETE/HOLD balance;
 - checkpoint selection by lowest validation endpoint delay at no more than 5% turn-level false cutoffs, with TPR-at-5%-FPR as a fallback when causal rows are unavailable.
+
+The 50/50 language target is calculated from the exact prepared manifest at startup; it does not
+assume a raw corpus ratio. Sampling uses replacement, preserves relative filler/causal priorities
+inside each language/label cell, and logs both expected probability mass and observed batch
+composition to W&B.
 
 W&B is disabled in the default local configuration and enabled by `configs/runpod.yaml` or
 `WANDB_ENABLED=true`. A fixed `WANDB_RUN_ID` resumes only the W&B logging stream; it does not resume

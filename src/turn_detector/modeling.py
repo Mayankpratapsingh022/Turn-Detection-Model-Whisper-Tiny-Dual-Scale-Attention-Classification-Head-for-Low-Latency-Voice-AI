@@ -102,7 +102,9 @@ def _build_model_class() -> type[Any]:
                 nn.GELU(),
                 nn.Linear(config.classifier_bottleneck_size, 1),
             )
-            self.filler_head = nn.Linear(hidden_size * 2, 1)
+            # Separate mid-turn and end-of-turn filler targets retain information that would be
+            # lost by collapsing both labels into a single "any filler" bit.
+            self.filler_head = nn.Linear(hidden_size * 2, 2)
 
         @staticmethod
         def _encoder_mask(frame_mask: Any, target_length: int) -> Any:
@@ -153,9 +155,7 @@ def _build_model_class() -> type[Any]:
                 tail_max = self._masked_max(hidden_states, tail_mask)
                 fused = torch.cat([global_embedding, tail_attention, tail_mean, tail_max], dim=-1)
             logits = self.classifier(fused).squeeze(-1)
-            filler_logits = self.filler_head(
-                torch.cat([global_embedding, tail_attention], dim=-1)
-            ).squeeze(-1)
+            filler_logits = self.filler_head(torch.cat([global_embedding, tail_attention], dim=-1))
             result: dict[str, Any] = {
                 "logits": logits,
                 "probabilities": torch.sigmoid(logits),

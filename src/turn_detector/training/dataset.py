@@ -116,17 +116,21 @@ class TurnAudioDataset(_DatasetBase):  # type: ignore[misc, valid-type]
                 ),
                 original_duration_seconds=record.duration_seconds,
             )
-        filler_label = -1 if record.filler_present is None else int(record.filler_present)
+        filler_labels = [
+            -1 if record.midfiller is None else int(record.midfiller),
+            -1 if record.endfiller is None else int(record.endfiller),
+        ]
         return {
             "audio": standardized,
             "label": record.label,
-            "filler_label": filler_label,
+            "filler_labels": filler_labels,
             "id": record.id,
             "parent_id": record.parent_id,
             "language": record.language,
             "speech_mix": record.speech_mix,
             "example_kind": record.example_kind,
             "pause_duration_ms": record.pause_duration_ms,
+            "is_hard_negative": record.is_hard_negative,
         }
 
     @property
@@ -146,7 +150,7 @@ class TurnCollator:
             "frame_mask": features.frame_mask,
             "labels": torch.tensor([example["label"] for example in examples], dtype=torch.long),
             "filler_labels": torch.tensor(
-                [example["filler_label"] for example in examples], dtype=torch.long
+                [example["filler_labels"] for example in examples], dtype=torch.long
             ),
             "ids": [example["id"] for example in examples],
             "parent_ids": [example["parent_id"] for example in examples],
@@ -154,4 +158,5 @@ class TurnCollator:
             "speech_mixes": [example["speech_mix"] for example in examples],
             "example_kinds": [example["example_kind"] for example in examples],
             "pause_durations_ms": [example["pause_duration_ms"] for example in examples],
+            "hard_negatives": [example["is_hard_negative"] for example in examples],
         }

@@ -53,6 +53,7 @@ train:
   save_steps: 500
   early_stopping_patience: 2
   mixed_precision: bf16
+  hindi_sampling_fraction: 0.50
   hard_negative_fraction: 0.30
   focused_sampling: true
   include_causal_pauses: true

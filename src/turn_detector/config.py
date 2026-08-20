@@ -96,6 +96,7 @@ class TrainConfig(StrictModel):
     save_steps: int = 500
     early_stopping_patience: int = 2
     mixed_precision: Literal["bf16", "fp16", "no"] = "bf16"
+    hindi_sampling_fraction: float = 0.50
     hard_negative_fraction: float = 0.30
     focused_sampling: bool = True
     include_causal_pauses: bool = True
@@ -109,6 +110,8 @@ class TrainConfig(StrictModel):
             raise ValueError("effective_batch_size must be divisible by physical_batch_size")
         if not 0 <= self.hard_negative_fraction < 1:
             raise ValueError("hard_negative_fraction must be in [0, 1)")
+        if not 0 < self.hindi_sampling_fraction < 1:
+            raise ValueError("hindi_sampling_fraction must be between 0 and 1")
         return self
 
     @property

@@ -1,16 +1,28 @@
 import numpy as np
 
 from turn_detector.data.records import AudioRecord
-from turn_detector.data.sampling import compute_sampling_weights, enforce_hard_negative_fraction
+from turn_detector.data.sampling import (
+    compute_sampling_weights,
+    enforce_hard_negative_fraction,
+    focused_sampling_weights,
+    sampling_mass_summary,
+)
 
 
-def record(record_id: str, endpoint: bool, weight: float) -> AudioRecord:
+def record(
+    record_id: str,
+    endpoint: bool,
+    weight: float,
+    *,
+    language: str = "hin",
+    hard: bool = False,
+) -> AudioRecord:
     return AudioRecord(
         id=record_id,
         parent_id=record_id,
         audio_path=f"{record_id}.flac",
         source_repo="fixture/repo",
-        language="hin",
+        language=language,
         endpoint_bool=endpoint,
         duration_seconds=1.0,
         valid_samples=16_000,
@@ -23,6 +35,7 @@ def record(record_id: str, endpoint: bool, weight: float) -> AudioRecord:
         audio_hash=record_id,
         acoustic_fingerprint=record_id,
         duplicate_group=record_id,
+        is_hard_negative=hard,
         sampling_weight=weight,
     )
 
@@ -44,3 +57,33 @@ def test_hard_negative_sampler_mass_is_explicit() -> None:
     )
     hard_mass = weights[-1] / weights.sum()
     assert np.isclose(hard_mass, 0.30)
+
+
+def test_focused_sampler_uses_manifest_groups_not_raw_counts() -> None:
+    records = [
+        record("hin-hold", False, 3.0),
+        record("hin-complete", True, 1.0),
+        *[record(f"eng-hold-{index}", False, 1.0, language="eng") for index in range(8)],
+        *[record(f"eng-complete-{index}", True, 2.0, language="eng") for index in range(8)],
+    ]
+    weights = focused_sampling_weights(records, hindi_fraction=0.50, hard_negative_fraction=0.30)
+    summary = sampling_mass_summary(weights, records)
+    assert np.isclose(summary["hindi_fraction"], 0.50)
+    assert np.isclose(summary["english_fraction"], 0.50)
+    assert np.isclose(summary["complete_fraction"], 0.50)
+    assert np.isclose(summary["hold_fraction"], 0.50)
+
+
+def test_focused_sampler_reserves_hard_mass_and_compensates_language() -> None:
+    records = [
+        record("hin-hold", False, 1.0),
+        record("hin-complete", True, 1.0),
+        record("eng-hold", False, 1.0, language="eng"),
+        record("eng-complete", True, 1.0, language="eng"),
+        record("eng-hard", False, 3.0, language="eng", hard=True),
+    ]
+    weights = focused_sampling_weights(records, hindi_fraction=0.50, hard_negative_fraction=0.30)
+    summary = sampling_mass_summary(weights, records)
+    assert np.isclose(summary["hindi_fraction"], 0.50)
+    assert np.isclose(summary["english_fraction"], 0.50)
+    assert np.isclose(summary["hard_negative_fraction"], 0.30)

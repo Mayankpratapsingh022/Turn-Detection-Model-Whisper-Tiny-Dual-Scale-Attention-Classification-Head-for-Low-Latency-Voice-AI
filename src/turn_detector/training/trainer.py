@@ -5,6 +5,7 @@ import math
 import random
 import shutil
 import time
+from collections import Counter
 from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
@@ -12,7 +13,7 @@ from typing import Any
 import numpy as np
 
 from turn_detector.config import AppConfig, EvaluationConfig
-from turn_detector.data.sampling import enforce_hard_negative_fraction
+from turn_detector.data.sampling import focused_sampling_weights, sampling_mass_summary
 from turn_detector.environment import load_project_env
 from turn_detector.evaluation.metrics import (
     PausePrediction,
@@ -70,10 +71,10 @@ def _make_loader(
     sampler = None
     shuffle = False
     if training and config.train.focused_sampling:
-        sampling_weights = enforce_hard_negative_fraction(
-            dataset.sampling_weights,
+        sampling_weights = focused_sampling_weights(
             dataset.records,
-            config.train.hard_negative_fraction,
+            hindi_fraction=config.train.hindi_sampling_fraction,
+            hard_negative_fraction=config.train.hard_negative_fraction,
         )
         weights = torch.as_tensor(sampling_weights, dtype=torch.double)
         sampler = torch.utils.data.WeightedRandomSampler(
@@ -92,6 +93,47 @@ def _make_loader(
         collate_fn=TurnCollator(config.model),
         drop_last=training,
     )
+
+
+def _update_batch_composition(counts: Counter[str], batch: dict[str, Any]) -> None:
+    labels = batch["labels"]
+    filler_labels = batch["filler_labels"]
+    batch_size = len(batch["languages"])
+    counts["examples"] += batch_size
+    counts["hindi"] += sum(language == "hin" for language in batch["languages"])
+    counts["complete"] += int((labels == 1).sum().item())
+    counts["causal_pause"] += sum(
+        kind == "causal_internal_pause" for kind in batch["example_kinds"]
+    )
+    counts["hard_negative"] += sum(bool(value) for value in batch["hard_negatives"])
+    for column, name in enumerate(("midfiller", "endfiller")):
+        known = filler_labels[:, column] >= 0
+        counts[f"{name}_known"] += int(known.sum().item())
+        counts[f"{name}_positive"] += int((filler_labels[:, column] == 1).sum().item())
+    any_known = (filler_labels >= 0).any(dim=1)
+    any_positive = (filler_labels == 1).any(dim=1)
+    counts["filler_known"] += int(any_known.sum().item())
+    counts["filler_positive"] += int((any_known & any_positive).sum().item())
+
+
+def _batch_composition_metrics(counts: Counter[str]) -> dict[str, float]:
+    examples = max(1, counts["examples"])
+
+    def known_fraction(positive: str, known: str) -> float:
+        return counts[positive] / max(1, counts[known])
+
+    return {
+        "train/batch_hindi_fraction": counts["hindi"] / examples,
+        "train/batch_english_fraction": (counts["examples"] - counts["hindi"]) / examples,
+        "train/batch_complete_fraction": counts["complete"] / examples,
+        "train/batch_hold_fraction": (counts["examples"] - counts["complete"]) / examples,
+        "train/batch_filler_fraction": known_fraction("filler_positive", "filler_known"),
+        "train/batch_midfiller_fraction": known_fraction("midfiller_positive", "midfiller_known"),
+        "train/batch_endfiller_fraction": known_fraction("endfiller_positive", "endfiller_known"),
+        "train/batch_filler_label_coverage": counts["filler_known"] / examples,
+        "train/batch_causal_pause_fraction": counts["causal_pause"] / examples,
+        "train/batch_hard_negative_fraction": counts["hard_negative"] / examples,
+    }
 
 
 def evaluate_model(
@@ -280,6 +322,27 @@ def _train_impl(config: AppConfig, tracker: ExperimentTracker) -> dict[str, Any]
         validation_batches=len(validation_loader),
         workers=config.train.num_workers,
     )
+    if config.train.focused_sampling:
+        expected_sampling = sampling_mass_summary(
+            focused_sampling_weights(
+                train_dataset.records,
+                hindi_fraction=config.train.hindi_sampling_fraction,
+                hard_negative_fraction=config.train.hard_negative_fraction,
+            ),
+            train_dataset.records,
+        )
+        tracker.set_summary({"sampler": {"expected": expected_sampling}})
+        log_event(
+            "train:sampler",
+            "READY",
+            hindi=f"{expected_sampling['hindi_fraction']:.3f}",
+            english=f"{expected_sampling['english_fraction']:.3f}",
+            complete=f"{expected_sampling['complete_fraction']:.3f}",
+            hold=f"{expected_sampling['hold_fraction']:.3f}",
+            filler=f"{expected_sampling['filler_fraction']:.3f}",
+            causal=f"{expected_sampling['causal_pause_fraction']:.3f}",
+            hard_negative=f"{expected_sampling['hard_negative_fraction']:.3f}",
+        )
 
     log_event(
         "train:model",
@@ -340,6 +403,7 @@ def _train_impl(config: AppConfig, tracker: ExperimentTracker) -> dict[str, Any]
     model.train()
     should_stop = False
     encoder_is_frozen = config.train.freeze_encoder_steps > 0
+    interval_composition: Counter[str] = Counter()
     for epoch in range(config.train.epochs):
         epoch_started = time.perf_counter()
         epoch_stage = f"train:epoch-{epoch + 1}"
@@ -351,6 +415,7 @@ def _train_impl(config: AppConfig, tracker: ExperimentTracker) -> dict[str, Any]
             unit="batch",
         ) as epoch_progress:
             for batch_index, batch in enumerate(epoch_progress):
+                _update_batch_composition(interval_composition, batch)
                 if encoder_is_frozen and global_step >= config.train.freeze_encoder_steps:
                     model.freeze_encoder(False)
                     encoder_is_frozen = False
@@ -390,6 +455,8 @@ def _train_impl(config: AppConfig, tracker: ExperimentTracker) -> dict[str, Any]
 
                 should_evaluate = global_step % config.train.eval_steps == 0
                 if global_step % config.train.log_every_steps == 0:
+                    training_metrics.update(_batch_composition_metrics(interval_composition))
+                    interval_composition.clear()
                     history.append({"step": global_step, **training_metrics})
                     tracker.log(training_metrics, step=global_step, commit=not should_evaluate)
                     log_event(
@@ -400,6 +467,9 @@ def _train_impl(config: AppConfig, tracker: ExperimentTracker) -> dict[str, Any]
                         loss=f"{training_metrics['train/loss']:.5f}",
                         main_loss=f"{training_metrics.get('train/main_loss', 0.0):.5f}",
                         filler_loss=f"{training_metrics.get('train/filler_loss', 0.0):.5f}",
+                        batch_hindi=f"{training_metrics['train/batch_hindi_fraction']:.3f}",
+                        batch_complete=f"{training_metrics['train/batch_complete_fraction']:.3f}",
+                        batch_endfiller=f"{training_metrics['train/batch_endfiller_fraction']:.3f}",
                         encoder_lr=f"{training_metrics.get('train/encoder_learning_rate', 0.0):.3e}",
                         head_lr=f"{training_metrics.get('train/head_learning_rate', 0.0):.3e}",
                     )

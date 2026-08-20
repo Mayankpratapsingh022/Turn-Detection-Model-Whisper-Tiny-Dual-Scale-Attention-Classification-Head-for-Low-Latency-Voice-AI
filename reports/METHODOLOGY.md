@@ -32,7 +32,9 @@ The backbone is the encoder half of Whisper Tiny. It is small, pretrained on mul
 
 The complete-turn branch carries grammar and long-range context. The final branch carries cadence, hesitation, list continuation, and end fillers. During training, an auxiliary head predicts whether a filler occurs using both global and final embeddings. It is omitted from the ONNX output.
 
-The model is deliberately audio-only at runtime. ASR-derived tags affect sampling and reporting, never inference features.
+The model is deliberately audio-only at runtime. Training uses source endpoint, filler, language,
+synthetic, and source-dataset metadata; optional ASR pseudo-labels are not part of the standard
+training path or inference features.
 
 ## Experiment sequence
 
