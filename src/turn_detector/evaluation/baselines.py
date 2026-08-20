@@ -11,6 +11,7 @@ import numpy as np
 from turn_detector.audio import ensure_float32_mono, resample_audio
 from turn_detector.config import AppConfig
 from turn_detector.data.records import write_json
+from turn_detector.evaluation.calibration import apply_temperature, select_policy_from_scored
 from turn_detector.evaluation.evaluator import (
     _causal_predictions,
     _metrics_by_slice,
@@ -41,7 +42,7 @@ class BaselinePrediction:
 class SmartTurnV32Baseline:
     """Official Smart Turn v3.2 CPU ONNX preprocessing and inference contract."""
 
-    def __init__(self, model_path: str | Path | None = None, *, intra_op_threads: int = 4) -> None:
+    def __init__(self, model_path: str | Path | None = None, *, intra_op_threads: int = 1) -> None:
         try:
             import onnxruntime as ort
             from transformers import WhisperFeatureExtractor
@@ -108,12 +109,26 @@ def _probabilities(scored: list[dict[str, Any]]) -> list[float]:
 
 
 def _latency(scored: list[dict[str, Any]]) -> dict[str, float]:
-    values = [float(row["inference_ms"]) for row in scored]
+    model_values = [float(row["inference_ms"]) for row in scored]
+    end_to_end_values = [float(row["end_to_end_ms"]) for row in scored]
     return {
-        "p50_ms": float(np.percentile(values, 50)),
-        "p95_ms": float(np.percentile(values, 95)),
-        "p99_ms": float(np.percentile(values, 99)),
+        "model_p50_ms": float(np.percentile(model_values, 50)),
+        "model_p95_ms": float(np.percentile(model_values, 95)),
+        "model_p99_ms": float(np.percentile(model_values, 99)),
+        "end_to_end_p50_ms": float(np.percentile(end_to_end_values, 50)),
+        "end_to_end_p95_ms": float(np.percentile(end_to_end_values, 95)),
+        "end_to_end_p99_ms": float(np.percentile(end_to_end_values, 99)),
     }
+
+
+def _temperature_scale_scored(
+    scored: list[dict[str, Any]], temperature: float
+) -> list[dict[str, Any]]:
+    calibrated = apply_temperature(_probabilities(scored), temperature)
+    return [
+        {**row, "probability": probability}
+        for row, probability in zip(scored, calibrated, strict=True)
+    ]
 
 
 def compare_baselines(
@@ -121,51 +136,78 @@ def compare_baselines(
     config: AppConfig,
     *,
     manifest_path: str | Path | None = None,
+    validation_manifest_path: str | Path | None = None,
     smart_turn_model_path: str | Path | None = None,
     limit: int | None = None,
 ) -> dict[str, Any]:
     """Paired candidate, public Smart Turn v3.2, and fixed-timeout evaluation."""
 
     manifest = Path(manifest_path or config.evaluation.test_manifest)
+    validation_manifest = Path(validation_manifest_path or config.train.validation_manifest)
+    target_false_cutoff_rate = config.evaluation.target_false_cutoff_rates[0]
     log_event(
         "baselines",
         "START",
         candidate=candidate_model_path,
         manifest=manifest,
+        validation_manifest=validation_manifest,
+        target_false_cutoff_rate=target_false_cutoff_rate,
         smart_turn_revision=SMART_TURN_REVISION,
         limit=limit or "none",
     )
     candidate = TurnDetector(candidate_model_path)
     published = SmartTurnV32Baseline(smart_turn_model_path)
+    published_validation = score_manifest(
+        published,
+        validation_manifest,
+        limit=limit,
+        progress_description="baseline smart-turn-v3.2 validation calibration",
+    )
+    baseline_config = config.model_copy(
+        update={"policy": config.policy.model_copy(update={"threshold": 0.5, "temperature": 1.0})}
+    )
+    published_policy, published_calibration = select_policy_from_scored(
+        published_validation,
+        baseline_config,
+        target_false_cutoff_rate=target_false_cutoff_rate,
+    )
     candidate_scored = score_manifest(
         candidate,
         manifest,
         limit=limit,
         progress_description="baseline candidate",
     )
-    published_scored = score_manifest(
+    published_scored_raw = score_manifest(
         published,
         manifest,
         limit=limit,
         progress_description="baseline smart-turn-v3.2",
     )
     candidate_ids = [row["id"] for row in candidate_scored]
-    if candidate_ids != [row["id"] for row in published_scored]:
+    if candidate_ids != [row["id"] for row in published_scored_raw]:
         raise RuntimeError("Candidate and baseline predictions are not aligned")
     if not candidate_scored:
         raise ValueError("Evaluation manifest is empty")
 
     labels = [int(row["label"]) for row in candidate_scored]
     candidate_probabilities = _probabilities(candidate_scored)
+    published_default_probabilities = _probabilities(published_scored_raw)
+    published_scored = _temperature_scale_scored(
+        published_scored_raw,
+        published_policy.temperature,
+    )
     published_probabilities = _probabilities(published_scored)
     groups = [str(row["parent_id"]) for row in candidate_scored]
     candidate_policy = candidate.policy
-    published_threshold = 0.5
+    published_threshold = published_policy.threshold
     candidate_static = binary_classification_metrics(
         labels, candidate_probabilities, threshold=candidate_policy.threshold
     )
     published_static = binary_classification_metrics(
         labels, published_probabilities, threshold=published_threshold
+    )
+    published_default_static = binary_classification_metrics(
+        labels, published_default_probabilities, threshold=0.5
     )
 
     candidate_causal = _causal_predictions(candidate_scored)
@@ -190,8 +232,8 @@ def compare_baselines(
             "smart_turn_v3.2": evaluate_policy(
                 published_causal,
                 threshold=published_threshold,
-                action_delay_ms=candidate_policy.min_silence_ms,
-                timeout_ms=candidate_policy.timeout_ms,
+                action_delay_ms=published_policy.min_silence_ms,
+                timeout_ms=published_policy.timeout_ms,
             ).as_dict(),
         }
     else:
@@ -213,7 +255,12 @@ def compare_baselines(
             "repo": SMART_TURN_REPO,
             "revision": SMART_TURN_REVISION,
             "model_path": str(published.model_path),
-            "threshold": published_threshold,
+            "policy": published_policy.model_dump(mode="json"),
+            "validation_calibration": {
+                **published_calibration,
+                "manifest": str(validation_manifest),
+            },
+            "default_threshold_0.5_static": published_default_static,
             "size_bytes": published.model_path.stat().st_size,
             "model_latency": _latency(published_scored),
             "static": published_static,
@@ -221,6 +268,12 @@ def compare_baselines(
         },
         "fixed_timeout_ms": fixed_timeouts,
         "causal_deployed_policy": causal_deployed,
+        "latency_contract": {
+            "execution_provider": "CPUExecutionProvider",
+            "intra_op_threads": 1,
+            "inter_op_threads": 1,
+            "end_to_end_excludes": ["audio_decode", "disk_io", "policy_silence_wait"],
+        },
         "paired_tests": {
             "mcnemar": mcnemar_test(
                 labels,
@@ -242,6 +295,8 @@ def compare_baselines(
             ),
         },
         "selection_split": "test",
+        "baseline_policy_selection_split": "validation",
+        "matched_validation_false_cutoff_budget": target_false_cutoff_rate,
         "test_policy_tuning_performed": False,
     }
     output_dir = config.evaluation.output_dir / "baselines"
@@ -250,6 +305,7 @@ def compare_baselines(
     for name, rows in (
         ("candidate", candidate_scored),
         ("smart_turn_v3.2", published_scored),
+        ("smart_turn_v3.2_validation", published_validation),
     ):
         with (output_dir / f"{name}_predictions.jsonl").open("w", encoding="utf-8") as handle:
             for row in rows:

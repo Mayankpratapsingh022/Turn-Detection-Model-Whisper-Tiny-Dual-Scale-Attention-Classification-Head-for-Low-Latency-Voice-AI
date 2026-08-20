@@ -31,7 +31,9 @@ The configuration rejects every training language except:
 - `hin` — Hindi;
 - `eng` — English.
 
-No other-language audio can silently enter the pipeline. ASR is used offline only to find high-confidence code-mixed examples; transcripts and language labels never enter production inference.
+No other-language audio can silently enter the pipeline. The standard training and evaluation path
+does not run ASR or infer a Hinglish label. An optional offline ASR audit is available for exploratory
+analysis only; its pseudo-labels are not training targets or production inputs.
 
 Before a final run, replace the `null` dataset and base-model revision fields in the chosen YAML with reviewed commit hashes. Until then, audit reports explicitly mark the source revision as `main (unpinned)`.
 

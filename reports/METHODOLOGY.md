@@ -19,7 +19,11 @@ Only the Hindi (`hin`) and English (`eng`) rows from the two Smart Turn v3.2 rep
 
 The pipeline decodes to mono 16 kHz, audits bad audio, removes arbitrary terminal silence, adds exactly 200 ms of candidate silence, keeps the last eight seconds, and left-pads shorter turns. It retains exact hashes and coarse acoustic fingerprints. All crops from one utterance share a duplicate group. Test parents overlapping either training split are removed before evaluation.
 
-The upstream rows do not identify Hinglish. Large-v3 ASR is therefore an offline indexing tool, not a model input. A row receives the high-confidence Hinglish tag only when its log-probability proxy passes the confidence guard and conservative lexical checks find both Hindi and English evidence. Low-recall tagging is acceptable here; contaminating the focus bucket is not. The tagger checkpoints and resumes because redoing a multi-hour ASR pass is avoidable waste.
+The upstream rows do not identify Hinglish. The standard pipeline therefore makes no
+Hinglish-specific measurement claim. Large-v3 ASR remains an optional exploratory indexing tool,
+not a model input or ground-truth label source. Hindi and filler slices are reported directly from
+source metadata; they are relevant to the intended domain but are not substitutes for a verified
+code-switch benchmark.
 
 Internal pauses are causal hard negatives only when the energy segmentation finds later speech of at least 500 ms. A crop ends 200 ms into that pause and is labeled `HOLD`; it never includes the future audio used to prove that the speaker continued.
 
@@ -43,7 +47,7 @@ training path or inference features.
 | E0 | How much latency is required by fixed 500/800/1200/1600 ms VAD timeouts? |
 | E1 | Does the candidate beat the pinned public Smart Turn v3.2 CPU model on identical rows? |
 | E2 | What does a plain global Whisper encoder learn with uniform sampling? |
-| E3 | Does Hindi/English/filler/Hinglish-focused sampling help the intended slices? |
+| E3 | Does balanced Hindi/English and filler-focused sampling help the intended slices? |
 | E4 | Does the final-window branch improve the latency/interruption frontier? |
 | E5 | Do causal pauses and filler supervision reduce false cutoffs? |
 | E6 | Does one round of mined high-scoring `HOLD` examples improve the remaining failure set? |
@@ -56,14 +60,19 @@ The best checkpoint is selected on validation endpoint delay subject to at most 
 The primary result is mean and p95 endpoint delay at fixed 5% and 10% false-cutoff budgets. The report must also include:
 
 - F1, balanced accuracy, AUROC, average precision, false-hold rate, Brier score, and ECE;
-- Hindi, English, high-confidence Hinglish, filler, source, real/synthetic, duration, and causal-pause slices;
+- Hindi, English, filler, source, real/synthetic, duration, and causal-pause slices;
 - turn-group bootstrap intervals for deployed false-cutoff rate and endpoint delay;
 - paired group-bootstrap delta and McNemar test against Smart Turn v3.2;
 - telephone, μ-law, 5/10/20 dB noise, reverb, speed, gain, and clipping stress tests;
-- FP32/INT8 parity, model size, and fixed-machine p50/p95/p99 CPU latency;
-- independent Hindi/English LiveKit EOT Bench results, kept completely outside training and policy selection.
+- FP32/INT8 parity, model size, and fixed-machine model-only plus preprocessing-and-model
+  p50/p95/p99 CPU latency.
 
-No model is called “best” because it has the highest accuracy. It is promoted only if its Pareto frontier improves and the intended Hindi/Hinglish/filler slices do not regress materially. If the public baseline wins, that is the result.
+An independent Hindi/Hinglish benchmark would strengthen external validity, but it is not reported
+unless human-verified labels and a leakage-free dataset are actually available.
+
+No model is called “best” because it has the highest accuracy. It is promoted only if its Pareto
+frontier improves and the measured Hindi and filler slices do not regress materially. If the public
+baseline wins, that is the result.
 
 ## Compute plan
 

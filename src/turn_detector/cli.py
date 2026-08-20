@@ -345,6 +345,14 @@ def compare_baselines_command(
     model_path: Annotated[Path, typer.Option(exists=True, dir_okay=False)],
     config_path: ConfigPath = Path("configs/default.yaml"),
     manifest: Annotated[Path | None, typer.Option(exists=True, dir_okay=False)] = None,
+    validation_manifest: Annotated[
+        Path | None,
+        typer.Option(
+            exists=True,
+            dir_okay=False,
+            help="Validation-only split used to calibrate the public baseline policy.",
+        ),
+    ] = None,
     smart_turn_model: Annotated[Path | None, typer.Option(exists=True, dir_okay=False)] = None,
     limit: Annotated[int | None, typer.Option()] = None,
     output_dir: Annotated[Path | None, typer.Option(file_okay=False)] = None,
@@ -362,6 +370,7 @@ def compare_baselines_command(
             model_path,
             config,
             manifest_path=manifest,
+            validation_manifest_path=validation_manifest,
             smart_turn_model_path=smart_turn_model,
             limit=limit,
         )

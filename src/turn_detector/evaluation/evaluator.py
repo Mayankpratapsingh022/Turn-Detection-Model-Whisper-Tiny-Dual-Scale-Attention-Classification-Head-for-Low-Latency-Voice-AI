@@ -4,7 +4,7 @@ import json
 import os
 import platform
 import time
-from collections import defaultdict
+from collections import Counter, defaultdict
 from itertools import islice
 from pathlib import Path
 from typing import Any, Protocol
@@ -82,7 +82,9 @@ def score_manifest(
     )
     for record in records:
         waveform, sample_rate = load_audio(record.resolved_audio_path(manifest))
+        started = time.perf_counter()
         prediction = detector.score(waveform[-record.valid_samples :], sample_rate)
+        end_to_end_ms = (time.perf_counter() - started) * 1_000
         scored.append(
             {
                 "id": record.id,
@@ -90,6 +92,7 @@ def score_manifest(
                 "label": record.label,
                 "probability": prediction.probability,
                 "inference_ms": prediction.inference_ms,
+                "end_to_end_ms": end_to_end_ms,
                 "pause_duration_ms": record.pause_duration_ms,
                 "language": record.language,
                 "slices": _slice_names(record),
@@ -148,12 +151,98 @@ def _causal_predictions(scored: list[dict[str, Any]]) -> list[PausePrediction]:
     return predictions
 
 
+def _filler_category(record: AudioRecord) -> str:
+    if record.midfiller and record.endfiller:
+        return "mid_and_end"
+    if record.midfiller:
+        return "mid"
+    if record.endfiller:
+        return "end"
+    if record.midfiller is None and record.endfiller is None:
+        return "unknown"
+    return "none"
+
+
+def _robustness_stratum(record: AudioRecord) -> tuple[str, ...]:
+    return (
+        record.language,
+        f"label:{record.label}",
+        f"kind:{record.example_kind}",
+        f"filler:{_filler_category(record)}",
+        f"synthetic:{record.synthetic}",
+    )
+
+
+def _stratified_robustness_sample(
+    records: list[AudioRecord], *, limit: int, seed: int
+) -> list[AudioRecord]:
+    """Deterministically round-robin across the evaluation-critical intersections."""
+
+    if limit <= 0 or not records:
+        return []
+    strata: dict[tuple[str, ...], list[AudioRecord]] = defaultdict(list)
+    for record in records:
+        strata[_robustness_stratum(record)].append(record)
+
+    rng = np.random.default_rng(seed)
+    buckets: dict[tuple[str, ...], list[AudioRecord]] = {}
+    for key, rows in strata.items():
+        ordered = sorted(rows, key=lambda row: row.id)
+        permutation = rng.permutation(len(ordered))
+        buckets[key] = [ordered[int(index)] for index in permutation]
+
+    selected: list[AudioRecord] = []
+    positions = {key: 0 for key in buckets}
+    active = sorted(buckets)
+    while active and len(selected) < min(limit, len(records)):
+        remaining: list[tuple[str, ...]] = []
+        for key in active:
+            position = positions[key]
+            if position < len(buckets[key]) and len(selected) < limit:
+                selected.append(buckets[key][position])
+                positions[key] += 1
+            if positions[key] < len(buckets[key]):
+                remaining.append(key)
+        active = remaining
+    return selected
+
+
+def _robustness_sampling_summary(
+    population: list[AudioRecord],
+    selected: list[AudioRecord],
+    *,
+    requested_limit: int,
+    seed: int,
+) -> dict[str, Any]:
+    def counts(rows: list[AudioRecord], field: str) -> dict[str, int]:
+        if field == "label":
+            values = ("complete" if row.label else "hold" for row in rows)
+        elif field == "filler":
+            values = (_filler_category(row) for row in rows)
+        else:
+            values = (str(getattr(row, field)) for row in rows)
+        return dict(sorted(Counter(values).items()))
+
+    dimensions = ("language", "label", "example_kind", "filler", "synthetic")
+    return {
+        "method": "deterministic_equal_round_robin_over_composite_strata",
+        "seed": seed,
+        "requested_limit": requested_limit,
+        "population_count": len(population),
+        "selected_count": len(selected),
+        "composite_strata_in_population": len({_robustness_stratum(row) for row in population}),
+        "composite_strata_selected": len({_robustness_stratum(row) for row in selected}),
+        "stratification_dimensions": list(dimensions),
+        "population": {field: counts(population, field) for field in dimensions},
+        "selected": {field: counts(selected, field) for field in dimensions},
+    }
+
+
 def _robustness_suite(
     detector: TurnDetector,
     manifest_path: str | Path,
-    records: list[AudioRecord],
+    selected: list[AudioRecord],
     *,
-    limit: int,
     threshold: float,
     seed: int,
 ) -> dict[str, Any]:
@@ -170,7 +259,6 @@ def _robustness_suite(
         "clipping",
         "reverb",
     ]
-    selected = records[:limit]
     results: dict[str, Any] = {}
     with progress_bar(
         total=len(corruption_names) * len(selected),
@@ -180,6 +268,7 @@ def _robustness_suite(
         for corruption in corruption_names:
             labels: list[int] = []
             probabilities: list[float] = []
+            slice_rows: list[dict[str, Any]] = []
             progress.set_postfix(corruption=corruption, refresh=False)
             for index, record in enumerate(selected):
                 waveform, sample_rate = load_audio(record.resolved_audio_path(manifest_path))
@@ -191,12 +280,21 @@ def _robustness_suite(
                     seed=seed + index,
                 )
                 labels.append(record.label)
-                probabilities.append(detector.score(corrupted, sample_rate).probability)
+                probability = detector.score(corrupted, sample_rate).probability
+                probabilities.append(probability)
+                slice_rows.append(
+                    {
+                        "label": record.label,
+                        "probability": probability,
+                        "slices": _slice_names(record),
+                    }
+                )
                 progress.update(1)
             if len(set(labels)) == 2:
-                results[corruption] = binary_classification_metrics(
-                    labels, probabilities, threshold=threshold
-                )
+                results[corruption] = {
+                    **binary_classification_metrics(labels, probabilities, threshold=threshold),
+                    "slices": _metrics_by_slice(slice_rows, threshold),
+                }
     return results
 
 
@@ -298,12 +396,23 @@ def evaluate(
         else None
     )
     records = [row["record"] for row in scored]
+    robustness_limit = min(config.evaluation.robustness_limit_per_slice, len(records))
+    robustness_records = _stratified_robustness_sample(
+        records,
+        limit=robustness_limit,
+        seed=config.evaluation.seed,
+    )
+    robustness_sampling = _robustness_sampling_summary(
+        records,
+        robustness_records,
+        requested_limit=robustness_limit,
+        seed=config.evaluation.seed,
+    )
     robustness = (
         _robustness_suite(
             detector,
             manifest,
-            records,
-            limit=min(config.evaluation.robustness_limit_per_slice, len(records)),
+            robustness_records,
             threshold=policy.threshold,
             seed=config.evaluation.seed,
         )
@@ -315,14 +424,18 @@ def evaluate(
             "evaluation:robustness",
             "COMPLETE",
             corruptions=len(robustness),
-            examples=min(config.evaluation.robustness_limit_per_slice, len(records)),
+            examples=len(robustness_records),
+            strata=robustness_sampling["composite_strata_selected"],
         )
+    slice_metrics = _metrics_by_slice(scored, policy.threshold)
     report = {
         "model_path": str(model_path),
         "manifest": str(manifest),
+        "selection_split": "test",
+        "test_policy_tuning_performed": False,
         "static": static,
         "policy": policy.model_dump(mode="json"),
-        "slices": _metrics_by_slice(scored, policy.threshold),
+        "slices": slice_metrics,
         "causal": {
             "pause_predictions": len(causal),
             "turns": len({row.parent_id for row in causal}),
@@ -332,11 +445,20 @@ def evaluate(
             "pareto_frontier": [result.as_dict() for result in pareto_frontier(sweep)],
         },
         "robustness": robustness,
+        "robustness_sampling": robustness_sampling if run_robustness else None,
         "latency": {
             "count": len(scored),
             "model_p50_ms": float(np.percentile([row["inference_ms"] for row in scored], 50)),
             "model_p95_ms": float(np.percentile([row["inference_ms"] for row in scored], 95)),
             "model_p99_ms": float(np.percentile([row["inference_ms"] for row in scored], 99)),
+            "end_to_end_p50_ms": float(np.percentile([row["end_to_end_ms"] for row in scored], 50)),
+            "end_to_end_p95_ms": float(np.percentile([row["end_to_end_ms"] for row in scored], 95)),
+            "end_to_end_p99_ms": float(np.percentile([row["end_to_end_ms"] for row in scored], 99)),
+            "contract": (
+                "Per-clip score timing. End-to-end includes waveform standardization, "
+                "Whisper log-Mel extraction, calibration, and ONNX inference; it excludes audio "
+                "decode/disk I/O and policy silence waiting."
+            ),
         },
         "runtime_environment": {
             "platform": platform.platform(),
@@ -344,7 +466,7 @@ def evaluate(
             "python": platform.python_version(),
             "logical_cpu_count": os.cpu_count(),
             "onnxruntime": getattr(__import__("onnxruntime"), "__version__", "unknown"),
-            "intra_op_threads": 4,
+            "intra_op_threads": 1,
         },
     }
     output_dir = config.evaluation.output_dir
@@ -365,7 +487,7 @@ def evaluate(
         examples=len(scored),
         causal_predictions=len(causal),
         policy_sweep_points=len(sweep),
-        slices=len(report["slices"]),
+        slices=len(slice_metrics),
         output=output_dir / "evaluation_report.json",
     )
     return report

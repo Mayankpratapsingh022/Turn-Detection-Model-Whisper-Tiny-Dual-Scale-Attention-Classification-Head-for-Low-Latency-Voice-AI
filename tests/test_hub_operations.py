@@ -70,8 +70,12 @@ def test_stage_model_release_contains_runtime_and_training_artifacts(tmp_path: P
     assert "model.safetensors" in staged
     assert "hinglish-turn.int8.onnx" in staged
     assert "evaluation/evaluation_report.json" in staged
+    assert "README.md" in staged
     assert "trainer_state.pt" in result["excluded"]
     assert (output / "release_manifest.json").exists()
+    generated_card = (output / "README.md").read_text()
+    assert "human-verified Hinglish" in generated_card
+    assert "Complete this section from" not in generated_card
 
 
 def test_push_model_is_private_and_uploads_only_manifest_files(
