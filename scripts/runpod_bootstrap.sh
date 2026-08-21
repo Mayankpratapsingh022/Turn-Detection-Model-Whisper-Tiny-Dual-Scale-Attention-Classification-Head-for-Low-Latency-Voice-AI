@@ -25,6 +25,14 @@ uv sync \
   --extra baselines \
   --extra demo
 
+if command -v nvidia-smi >/dev/null 2>&1; then
+  if ! .venv/bin/python -c "import torch; assert torch.cuda.is_available(), f'CUDA unavailable: torch={torch.__version__}, torch_cuda={torch.version.cuda}'; print(f'CUDA preflight passed: torch={torch.__version__}, cuda={torch.version.cuda}, gpu={torch.cuda.get_device_name(0)}')"; then
+    echo "RunPod CUDA preflight failed. Do not start training on CPU." >&2
+    echo "Install a PyTorch build compatible with the host driver before continuing." >&2
+    exit 1
+  fi
+fi
+
 mkdir -p artifacts/cache artifacts/wandb
 if [[ ! -f .env ]]; then
   cp .env.example .env

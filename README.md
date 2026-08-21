@@ -149,7 +149,7 @@ cached revisions. The full pipeline is:
 bash scripts/runpod_pipeline.sh
 ```
 
-It runs preparation, E5 training, hard-negative mining, E6 training, static
+It runs preparation, E5 training, hard-negative mining, E6 training, dynamic weight-only
 INT8 export, calibration, the full evaluation suite, baseline comparison, and release packaging.
 It deliberately stops before uploading anything. Restart at a named stage after an interruption:
 
@@ -303,7 +303,10 @@ uv run turn-detector export \
   --quantize
 ```
 
-By default, export performs static QDQ INT8 quantization using up to 1,024 held-out validation examples; use `--dynamic` only as a fallback. Export fails if PyTorch-to-ONNX FP32 probability error reaches `0.01`. It writes FP32 and INT8 files, the exact model contract, `policy.json`, and a parity/size report.
+The RunPod production pipeline uses dynamic weight-only INT8 quantization to preserve Whisper Tiny
+probabilities. Static QDQ activation calibration remains available as an experiment. Export fails
+if PyTorch-to-ONNX FP32 probability error reaches `0.01`; every INT8 export records maximum/mean
+probability deltas, size, method, and its parity verdict.
 
 Fit temperature, threshold, candidate-pause delay, and fallback timeout on validation only:
 

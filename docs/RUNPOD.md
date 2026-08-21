@@ -118,6 +118,29 @@ Preparation is cache aware. The model trainer does not yet reconstruct an interr
 optimizer/data-loader position, so a restarted `train_e5` or `train_e6` stage is a clean new
 training run. Checkpoints are still retained for audit and inference.
 
+### Finalize a validated dynamic INT8 export
+
+The standard RunPod pipeline uses dynamic weight-only INT8 quantization because it preserves model
+probabilities substantially better than activation-quantized static INT8 on Whisper Tiny. If E6
+and `artifacts/export/e6_dynamic/hinglish-turn.int8.onnx` already exist, run calibration, the full
+evaluation, public baselines, and packaging as one resumable workflow:
+
+```bash
+bash scripts/runpod_dynamic_finalize.sh
+```
+
+All output is appended to `artifacts/dynamic-pipeline.log`. The script validates that the export is
+dynamic and passed the parity target before starting expensive evaluation. Resume a later stage
+without repeating completed work:
+
+```bash
+DYNAMIC_START_AT=baselines bash scripts/runpod_dynamic_finalize.sh
+```
+
+Valid stages are `calibrate`, `evaluate`, `baselines`, and `package`. Override artifact paths with
+the corresponding `DYNAMIC_*` environment variables when finalizing a differently named run. The
+script never uploads a model.
+
 ## Promotion gate
 
 Do not choose a model from test accuracy alone. Promote E6 only after reviewing:

@@ -32,7 +32,7 @@ asr = ["faster-whisper>=1.1,<2"]
 train = [
   "accelerate>=1.2,<2",
   "safetensors>=0.5,<1",
-  "torch>=2.5,<3",
+  "torch==2.6.0",
   "transformers>=4.47,<5",
 ]
 tracking = ["wandb>=0.19,<1"]

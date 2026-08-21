@@ -83,7 +83,7 @@ run_stage train_e6 uv run turn-detector train \
 run_stage export uv run turn-detector export \
   --checkpoint artifacts/checkpoints/e6_hard_negative/best \
   --output artifacts/export/e6/hinglish-turn.onnx \
-  --config artifacts/configs/runpod.pinned.yaml --quantize --static
+  --config artifacts/configs/runpod.pinned.yaml --quantize --dynamic
 run_stage calibrate uv run turn-detector calibrate \
   --model-path artifacts/export/e6/hinglish-turn.int8.onnx \
   --config artifacts/configs/runpod.pinned.yaml --target-false-cutoff-rate 0.05
