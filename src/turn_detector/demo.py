@@ -75,8 +75,10 @@ body, .gradio-container {
     height: 18px;
 }
 .td-subtitle {
-    color: #a3a3a3;
-    margin-top: -8px;
+    color: #b8b8b8;
+    margin: 0 0 14px;
+    padding: 5px 0 3px;
+    line-height: 1.5;
 }
 .td-detect {
     min-height: 46px;
@@ -327,6 +329,7 @@ def demo_launch_kwargs() -> dict[str, Any]:
         "css": DEMO_CSS,
         "show_error": True,
         "footer_links": ["api"],
+        "ssr_mode": False,
     }
 
 
@@ -382,6 +385,16 @@ def build_demo(
             temperature=detector.policy.temperature,
             duration_seconds=waveform.size / sample_rate,
         )
+
+    # ZeroGPU requires the real Gradio inference callback to declare its GPU lease. The deployed
+    # dynamic INT8 graph still uses ONNX Runtime's CPU provider; wrapping the actual callback keeps
+    # local CPU behavior unchanged while satisfying the hosting contract on ZeroGPU.
+    try:
+        import spaces
+    except ImportError:  # pragma: no cover - provided only by Hugging Face ZeroGPU
+        pass
+    else:
+        predict = spaces.GPU(duration=10)(predict)
 
     def show_processing() -> str:
         return PROCESSING_BAR_HTML
@@ -551,7 +564,7 @@ def build_demo(
                 api_description="Predict COMPLETE or HOLD for one audio file.",
                 show_progress="full",
                 show_progress_on=[decision, probability, details],
-                queue=False,
+                queue=True,
             )
             prediction_event.then(
                 hide_processing,

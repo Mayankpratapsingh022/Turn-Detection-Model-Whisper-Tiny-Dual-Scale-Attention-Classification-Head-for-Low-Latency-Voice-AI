@@ -1,5 +1,5 @@
 ---
-title: Turn Detection · Whisper Tiny Dual-Scale
+title: Hinglish Turn Detector Inference
 colorFrom: gray
 colorTo: gray
 sdk: gradio
@@ -7,7 +7,7 @@ sdk_version: 6.17.3
 python_version: 3.12
 app_file: app.py
 pinned: false
-short_description: Audio-only COMPLETE/HOLD detection for Hindi, English, fillers, and pauses.
+short_description: Audio-only turn detection for Hindi, English and fillers.
 license: other
 ---
 

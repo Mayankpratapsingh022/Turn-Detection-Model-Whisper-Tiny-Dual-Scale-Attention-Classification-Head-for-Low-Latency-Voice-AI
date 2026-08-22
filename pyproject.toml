@@ -107,6 +107,7 @@ module = [
   "safetensors.*",
   "scipy.*",
   "soundfile.*",
+  "spaces.*",
   "torch.*",
   "tqdm.*",
   "transformers.*",

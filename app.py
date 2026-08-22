@@ -1,7 +1,14 @@
 from __future__ import annotations
 
 import os
+import sys
 import warnings
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parent
+SRC_ROOT = PROJECT_ROOT / "src"
+if str(SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(SRC_ROOT))
 
 os.environ.setdefault("TRANSFORMERS_NO_ADVISORY_WARNINGS", "1")
 warnings.filterwarnings(
