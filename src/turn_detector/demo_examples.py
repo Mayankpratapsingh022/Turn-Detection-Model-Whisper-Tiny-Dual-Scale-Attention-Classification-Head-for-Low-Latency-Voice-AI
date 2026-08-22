@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -8,7 +9,7 @@ from typing import Any
 from urllib.parse import quote, urlparse
 from urllib.request import Request, urlopen
 
-DATASET_REPO = "pipecat-ai/smart-turn-data-v3.2-train"
+DATASET_REPO_ENV = "TURN_DEMO_DATASET_REPO"
 DATASET_REVISION = "e564e2ac567f774d1880aa1db6ce97afb8c519b7"
 DATASET_CONFIG = "default"
 DATASET_SPLIT = "train"
@@ -56,8 +57,8 @@ def _request_bytes(url: str, *, timeout_seconds: float, maximum_bytes: int) -> b
     return payload
 
 
-def _first_rows_url() -> str:
-    dataset = quote(DATASET_REPO, safe="")
+def _first_rows_url(dataset_repo: str) -> str:
+    dataset = quote(dataset_repo, safe="")
     return (
         "https://datasets-server.huggingface.co/first-rows"
         f"?dataset={dataset}&config={DATASET_CONFIG}&split={DATASET_SPLIT}"
@@ -95,13 +96,16 @@ def load_demo_examples(
     """
 
     try:
+        dataset_repo = os.environ.get(DATASET_REPO_ENV, "").strip()
+        if not dataset_repo:
+            return []
         payload = _request_bytes(
-            _first_rows_url(),
+            _first_rows_url(dataset_repo),
             timeout_seconds=timeout_seconds,
             maximum_bytes=4 * 1024 * 1024,
         )
         document = json.loads(payload)
-        if document.get("dataset") != DATASET_REPO:
+        if document.get("dataset") != dataset_repo:
             raise ValueError("Dataset viewer returned a different repository.")
         rows = {
             int(item["row_idx"]): item["row"]

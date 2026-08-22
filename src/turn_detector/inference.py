@@ -8,8 +8,8 @@ from typing import Any
 import numpy as np
 
 from turn_detector.audio import ensure_float32_mono, resample_audio, standardize_candidate_audio
-from turn_detector.config import ModelConfig, PolicyConfig
 from turn_detector.features import WhisperTurnFeatureExtractor
+from turn_detector.runtime_config import ModelConfig, PolicyConfig
 from turn_detector.types import TurnDecision, TurnEvent, TurnEventType, TurnPrediction
 
 

@@ -13,8 +13,16 @@ dist/
 .coverage
 htmlcov/
 
-# Private working report (not for GitHub yet)
+# Private working reports and submission-source artifacts
 /REPORT.md
+/reports/visual-report/
+/reports/submission/
+/reports/turn_detector_architecture_diagram_audit.txt
+/reports/turn_detector_architecture_paperbanana_prompt.txt
+
+# Only the optimized images referenced by README.md belong in GitHub.
+/docs/readme-assets/*
+!/docs/readme-assets/*.png
 
 # Large/generated assets
 /artifacts/*

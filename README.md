@@ -4,7 +4,12 @@
 
 An audio-only classifier that decides whether a speaker has finished their turn or is pausing before continuing. The model is built for Hindi and English speech, with explicit training pressure on fillers, internal pauses, and false interruptions. It does not run ASR at inference time.
 
-[Model weights](https://huggingface.co/Mayank022/hinglish-turn-detector-whisper-tiny-dual-scale) · [Technical report](reports/FINAL_REPORT.md) · [Methodology](reports/METHODOLOGY.md) · [RunPod guide](docs/RUNPOD.md)
+<p align="center">
+  <a href="https://huggingface.co/spaces/Mayank022/hinglish-turn-detector-inference"><img alt="Open the live Gradio inference demo" src="https://img.shields.io/badge/Live%20Gradio%20Inference-Open-111111?style=for-the-badge"></a>
+  <a href="https://huggingface.co/Mayank022/hinglish-turn-detector-whisper-tiny-dual-scale"><img alt="Download model weights from Hugging Face" src="https://img.shields.io/badge/Hugging%20Face%20Model-Weights-111111?style=for-the-badge"></a>
+</p>
+
+[Technical report](reports/FINAL_REPORT.md) · [Methodology](reports/METHODOLOGY.md) · [RunPod guide](docs/RUNPOD.md) · [Hugging Face Space guide](docs/HUGGINGFACE_SPACE.md)
 
 ## Result
 
@@ -26,6 +31,12 @@ Results below are from 21,995 held-out examples. Temperature, probability thresh
 | Dynamic INT8 size | 10.16 MiB |
 
 On the same test rows and under the same validation-selected 5% false-cutoff budget, Smart Turn v3.2 scored 0.4364 F1. This model scored 0.7399, a paired improvement of +0.3035 F1. The 95% parent-turn bootstrap interval was [+0.2884, +0.3182].
+
+<p align="center">
+  <img src="docs/readme-assets/baseline_comparison.png" alt="Held-out F1 comparison between the selected E6 dynamic INT8 model and Smart Turn v3.2" width="820">
+</p>
+
+The baseline comparison uses the same held-out rows and a policy selected under the same validation interruption budget. It is not a comparison of independently tuned test-set thresholds.
 
 This is a good result, but it is not the whole story. The Hindi false-cutoff rate is 11.44%, compared with 3.62% for English. Filler-heavy and noisy speech are also harder. Those errors are reported below rather than hidden behind the aggregate score.
 
@@ -52,37 +63,19 @@ The deployed policy is:
 | Test turn-level false-cutoff rate | 4.97% |
 | Mean / p95 endpoint latency | 512.3 / 1,000 ms |
 
+<p align="center">
+  <img src="docs/readme-assets/policy_frontier.png" alt="Endpoint latency versus false-cutoff trade-off with the deployed policy marked at 4.97 percent and 512 milliseconds" width="900">
+</p>
+
+The selected operating point sits just inside the 5% turn-level false-cutoff budget. Moving farther right reduces latency, but causes more interruptions.
+
 The timeout is part of the contract. A low false-cutoff rate is not useful if the system achieves it by waiting several seconds on every turn.
 
 ## Architecture
 
-```text
-16 kHz mono waveform, last 8 seconds
-                  │
-                  ▼
-      80-bin Whisper log-Mel features
-             [batch, 80, 800]
-                  │
-                  ▼
-       Whisper Tiny audio encoder
-       4 layers, hidden size 384
-                  │
-       ┌──────────┴──────────┐
-       │                     │
-       ▼                     ▼
-masked global          final 1.5 seconds
-attention pool      attention + mean + max
-       │                     │
-       └──────────┬──────────┘
-                  ▼
-       fused 1,536-d representation
-                  │
-                  ▼
- LayerNorm → 256 → GELU → Dropout → 64 → GELU → 1
-                  │
-                  ▼
-        calibrated P(COMPLETE)
-```
+<p align="center">
+  <img src="docs/readme-assets/architecture.png" alt="Architecture from candidate audio through log-mel features, Whisper Tiny, global and recent-context branches, fusion, and the classification head" width="100%">
+</p>
 
 The global branch carries context from the full turn. The tail branch concentrates on recent cadence, hesitation, and fillers. A separate two-output filler head predicts mid-turn and end-turn fillers during training; it is omitted from the exported inference graph.
 
@@ -114,6 +107,10 @@ Preparation performs the following operations:
 
 The E5 manifest contained 180,589 training examples from 73,679 parent utterances: 73,679 original endpoints and 106,910 causal internal-pause crops. Hard-negative mining added 10,933 difficult `HOLD` examples for E6, producing 191,522 training examples. Validation contained 9,493 examples.
 
+<p align="center">
+  <img src="docs/readme-assets/dataset_construction.png" alt="Training-set construction from original examples, causal pause crops, and mined hard negatives" width="900">
+</p>
+
 E6 sampling used replacement to create the training mix from the actual manifest:
 
 | Sampling mass | Value |
@@ -138,9 +135,27 @@ Training used weighted binary cross entropy for the turn label, with `HOLD` erro
 
 On the corrected CUDA 12.4 environment, E6 completed in 1,048 seconds on one NVIDIA L40S. Hard-negative mining took 1,198 seconds. See the [technical report](reports/FINAL_REPORT.md) for the run chronology and the CPU-fallback lesson that led to the bootstrap CUDA check.
 
+### Training dynamics
+
+<p align="center">
+  <img src="docs/readme-assets/training_loss.png" alt="E6 endpoint and filler training losses across optimizer steps" width="900">
+</p>
+
+The dotted line marks the encoder unfreeze at optimizer step 500. Endpoint loss continues to fall after unfreezing, while the noisier auxiliary filler objective remains bounded.
+
+<p align="center">
+  <img src="docs/readme-assets/validation_selection.png" alt="Validation F1 and safe-policy latency across evaluated checkpoints" width="900">
+</p>
+
+Validation F1 rises while the safe-policy endpoint delay falls. Checkpoint selection uses the validation interruption constraint rather than training loss alone.
+
 ## Evaluation
 
 ### Main slices
+
+<p align="center">
+  <img src="docs/readme-assets/slice_audit.png" alt="F1 and false-cutoff rates for Hindi, English, filler, and original-example slices" width="900">
+</p>
 
 | Slice | Count | F1 | False-cutoff rate |
 |---|---:|---:|---:|
@@ -157,6 +172,10 @@ Some important slices contain only one class. F1 is undefined for those slices, 
 ### Robustness
 
 The robustness subset was deterministically stratified across language, label, original/causal examples, filler type, and synthetic status. Every corruption used the same selected records.
+
+<p align="center">
+  <img src="docs/readme-assets/robustness.png" alt="Robustness F1 and false-cutoff rates under noise, reverb, telephone, gain, clipping, speed, and mu-law transformations" width="900">
+</p>
 
 | Condition | F1 | False-cutoff rate |
 |---|---:|---:|
@@ -178,6 +197,10 @@ Moderate noise, clipping, gain changes, and μ-law remain usable. Heavy noise an
 
 Static activation quantization made the model smaller but changed its probabilities too much. It was rejected. Dynamic weight-only quantization is slightly larger and preserves the FP32 scores closely enough for deployment.
 
+<p align="center">
+  <img src="docs/readme-assets/runtime_export.png" alt="CPU latency, model size, and quantization probability-drift comparison" width="900">
+</p>
+
 | Export | Size | Max probability delta | Mean delta | Decision |
 |---|---:|---:|---:|---|
 | FP32 ONNX | 31.73 MiB | 0.000001 vs PyTorch | — | Reference |
@@ -195,7 +218,7 @@ Latency was measured with ONNX Runtime using one intra-op thread on the RunPod x
 
 ## Use the model
 
-The Hugging Face repository is private until its distribution terms are reviewed. Authenticate with a read token before loading it remotely.
+The published [Hugging Face model repository](https://huggingface.co/Mayank022/hinglish-turn-detector-whisper-tiny-dual-scale) contains the dynamic INT8 and FP32 ONNX exports, PyTorch weights, the calibrated policy, configuration, and machine-readable evaluation reports.
 
 ```bash
 uv sync --extra runtime
@@ -231,6 +254,8 @@ The exported ONNX contract is:
 | `p_complete` | float32 `[batch, 1]` |
 
 ## Gradio and Hugging Face Spaces
+
+Try the public [Gradio inference demo](https://huggingface.co/spaces/Mayank022/hinglish-turn-detector-inference) before running it locally. It supports preset examples, file upload, and microphone recording.
 
 Launch the polished microphone/upload demo locally:
 

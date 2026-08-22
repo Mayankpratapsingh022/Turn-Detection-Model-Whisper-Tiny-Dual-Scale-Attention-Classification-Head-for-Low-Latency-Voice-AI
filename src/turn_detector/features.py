@@ -6,7 +6,7 @@ from typing import Any
 import numpy as np
 
 from turn_detector.audio import StandardizedAudio
-from turn_detector.config import ModelConfig
+from turn_detector.runtime_config import ModelConfig
 
 
 @dataclass(frozen=True, slots=True)

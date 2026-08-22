@@ -10,7 +10,7 @@ import soundfile as sf
 import turn_detector.demo as demo_module
 from turn_detector.config import PolicyConfig
 from turn_detector.demo import _format_result, _prepare_audio
-from turn_detector.demo_examples import DATASET_REPO, DATASET_REVISION, load_demo_examples
+from turn_detector.demo_examples import DATASET_REPO_ENV, DATASET_REVISION, load_demo_examples
 from turn_detector.types import TurnDecision, TurnPrediction
 
 
@@ -132,6 +132,8 @@ def test_demo_examples_download_pinned_hindi_and_english_rows(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    dataset_repo = "example-org/example-turn-data"
+    monkeypatch.setenv(DATASET_REPO_ENV, dataset_repo)
     rows = []
     metadata = (
         (33, "hin", False),
@@ -155,7 +157,7 @@ def test_demo_examples_download_pinned_hindi_and_english_rows(
                         {
                             "src": (
                                 "https://datasets-server.huggingface.co/assets/"
-                                f"{DATASET_REPO}/--/{DATASET_REVISION}/--/default/train/"
+                                f"{dataset_repo}/--/{DATASET_REVISION}/--/default/train/"
                                 f"{row_index}/audio/audio.wav"
                             )
                         }
@@ -163,7 +165,7 @@ def test_demo_examples_download_pinned_hindi_and_english_rows(
                 },
             }
         )
-    document = json.dumps({"dataset": DATASET_REPO, "rows": rows}).encode()
+    document = json.dumps({"dataset": dataset_repo, "rows": rows}).encode()
 
     def fake_request(url: str, **_kwargs: object) -> bytes:
         return document if "first-rows" in url else b"RIFF" + (b"\x00" * 64)
