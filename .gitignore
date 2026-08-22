@@ -13,6 +13,9 @@ dist/
 .coverage
 htmlcov/
 
+# Private working report (not for GitHub yet)
+/REPORT.md
+
 # Large/generated assets
 /artifacts/*
 !artifacts/.gitkeep

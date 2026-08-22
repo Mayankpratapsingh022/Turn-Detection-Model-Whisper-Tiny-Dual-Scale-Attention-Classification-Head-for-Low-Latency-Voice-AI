@@ -1,1 +1,2 @@
-.[runtime,eval,demo]
+.[runtime,demo]
+gradio==6.17.3

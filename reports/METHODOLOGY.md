@@ -51,7 +51,7 @@ training path or inference features.
 | E4 | Does the final-window branch improve the latency/interruption frontier? |
 | E5 | Do causal pauses and filler supervision reduce false cutoffs? |
 | E6 | Does one round of mined high-scoring `HOLD` examples improve the remaining failure set? |
-| E7 | What is lost after held-out static INT8 quantization? |
+| E7 | Which INT8 method preserves held-out probability parity: static QDQ or dynamic weight-only? |
 
 The best checkpoint is selected on validation endpoint delay subject to at most 5% turn-level false cutoffs. Temperature and policy values are fitted on validation after export. The test set is evaluated once with those frozen values.
 
@@ -70,9 +70,14 @@ The primary result is mean and p95 endpoint delay at fixed 5% and 10% false-cuto
 An independent Hindi/Hinglish benchmark would strengthen external validity, but it is not reported
 unless human-verified labels and a leakage-free dataset are actually available.
 
-No model is called “best” because it has the highest accuracy. It is promoted only if its Pareto
+No model is called "best" because it has the highest accuracy. It is promoted only if its Pareto
 frontier improves and the measured Hindi and filler slices do not regress materially. If the public
 baseline wins, that is the result.
+
+The completed E7 comparison rejected static activation quantization because its maximum probability
+delta was 0.5743. Dynamic weight-only INT8 produced a 10.16 MiB model with a 0.0178 maximum and
+0.0091 mean probability delta, so the dynamic export became the release candidate. Measured E6
+results and failure analysis are recorded in [`FINAL_REPORT.md`](FINAL_REPORT.md).
 
 ## Compute plan
 

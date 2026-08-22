@@ -445,9 +445,13 @@ def demo_command(
     server_port: Annotated[int, typer.Option()] = 7860,
 ) -> None:
     """Launch the Gradio microphone and upload demo."""
-    from turn_detector.demo import build_demo
+    from turn_detector.demo import build_demo, demo_launch_kwargs
 
-    build_demo(model_path).launch(share=share, server_port=server_port)
+    build_demo(model_path).launch(
+        share=share,
+        server_port=server_port,
+        **demo_launch_kwargs(),
+    )
 
 
 @app.command("show-report")

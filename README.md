@@ -1,508 +1,316 @@
-# HinglishTurn-8M
+# Turn Detection Model
 
-A small, audio-native end-of-turn detector for Hindi, Hinglish, Indian English, filler words, and real pauses. It answers one question: **did the user finish, or are they going to continue?**
+### Whisper Tiny + dual-scale attention head for low-latency voice AI
 
-The production model is designed to be an approximately 8–10 MB INT8 ONNX file that runs only after a lightweight VAD observes a candidate pause. It does not require a transcript at inference time.
+An audio-only classifier that decides whether a speaker has finished their turn or is pausing before continuing. The model is built for Hindi and English speech, with explicit training pressure on fillers, internal pauses, and false interruptions. It does not run ASR at inference time.
 
-> Status: the repository, data pipeline, model, trainer, export path, and evaluation harness are implemented. No cloud job is launched by this repository. Model weights and measured results must be produced by running the documented training workflow.
+[Model weights](https://huggingface.co/Mayank022/hinglish-turn-detector-whisper-tiny-dual-scale) · [Technical report](reports/FINAL_REPORT.md) · [Methodology](reports/METHODOLOGY.md) · [RunPod guide](docs/RUNPOD.md)
 
-The reasoning and promotion rules are written separately in [`reports/METHODOLOGY.md`](reports/METHODOLOGY.md); generated numbers belong in [`reports/REPORT_TEMPLATE.md`](reports/REPORT_TEMPLATE.md).
+## Result
 
-## Why this is not just another VAD
+The selected E6 model is an 8.30M-parameter network built from the Whisper Tiny audio encoder, a dual-scale classification head, and one round of hard-negative mining. The deployed artifact is a 10.16 MiB dynamic INT8 ONNX model.
 
-An energy VAD can tell that the microphone became quiet. It cannot distinguish:
+Results below are from 21,995 held-out examples. Temperature, probability threshold, silence delay, and fallback timeout were selected on validation and frozen before test evaluation.
 
-- “mujhe ek cab book karni hai” — probably complete;
-- “mujhe ek cab book karni hai, umm…” — probably holding the floor;
-- “number is nine eight seven…” — likely an unfinished sequence;
-- a genuine ending from a long thinking pause.
+| Metric | E6 dynamic INT8 |
+|---|---:|
+| F1 | **0.7399** |
+| Balanced accuracy | **0.8248** |
+| AUROC | **0.9361** |
+| Average precision | **0.7983** |
+| False-cutoff rate | **4.72%** |
+| False-hold rate | 30.33% |
+| Expected calibration error | 0.1043 |
+| Mean causal endpoint latency | 512.3 ms |
+| End-to-end CPU latency, p50 / p95 / p99 | 47.36 / 82.36 / 87.90 ms |
+| Dynamic INT8 size | 10.16 MiB |
 
-HinglishTurn uses Whisper-Tiny's audio representation for linguistic information and a dedicated final-window branch for cadence and fillers. A calibrated policy then trades endpoint latency against false interruptions.
+On the same test rows and under the same validation-selected 5% false-cutoff budget, Smart Turn v3.2 scored 0.4364 F1. This model scored 0.7399, a paired improvement of +0.3035 F1. The 95% parent-turn bootstrap interval was [+0.2884, +0.3182].
 
-## Scope and data rules
+This is a good result, but it is not the whole story. The Hindi false-cutoff rate is 11.44%, compared with 3.62% for English. Filler-heavy and noisy speech are also harder. Those errors are reported below rather than hidden behind the aggregate score.
 
-Training audio comes only from the supplied Smart Turn v3.2 dataset family:
+## What the model decides
 
-- [`pipecat-ai/smart-turn-data-v3.2-train`](https://huggingface.co/datasets/pipecat-ai/smart-turn-data-v3.2-train)
-- [`pipecat-ai/smart-turn-data-v3.2-test`](https://huggingface.co/datasets/pipecat-ai/smart-turn-data-v3.2-test)
+A voice activity detector can find silence. It cannot tell the difference between a finished request and a thinking pause:
 
-The configuration rejects every training language except:
+```text
+"mujhe ek cab book karni hai"          likely COMPLETE
+"mujhe ek cab book karni hai, umm..."  likely HOLD
+"number is nine eight seven..."        likely HOLD
+```
 
-- `hin` — Hindi;
-- `eng` — English.
+This model is called after a lightweight VAD observes a candidate pause. It scores the last eight seconds of audio and returns a calibrated probability of `COMPLETE`. If the score is below the threshold, the application keeps listening until speech resumes or the fallback timeout is reached.
 
-No other-language audio can silently enter the pipeline. The standard training and evaluation path
-does not run ASR or infer a Hinglish label. An optional offline ASR audit is available for exploratory
-analysis only; its pseudo-labels are not training targets or production inputs.
+The deployed policy is:
 
-Before a final run, replace the `null` dataset and base-model revision fields in the chosen YAML with reviewed commit hashes. Until then, audit reports explicitly mark the source revision as `main (unpinned)`.
+| Setting | Value |
+|---|---:|
+| Calibrated threshold | 0.38 |
+| Temperature | 2.5522 |
+| Minimum candidate silence | 300 ms |
+| Fallback timeout | 1,000 ms |
+| Test turn-level false-cutoff rate | 4.97% |
+| Mean / p95 endpoint latency | 512.3 / 1,000 ms |
 
-The upstream dataset card does not currently declare an explicit dataset license. Confirm the terms for derived model weights before publishing them, and do not copy source audio into this repository.
+The timeout is part of the contract. A low false-cutoff rate is not useful if the system achieves it by waiting several seconds on every turn.
 
 ## Architecture
 
 ```text
-16 kHz mono PCM
-       │
-       ▼
-Silero/energy VAD: candidate pause after 200 ms
-       │
-       ▼
-Last 8 s, left padded, standardized trailing silence
-       │
-       ▼
-80-bin Whisper log-Mel features + valid-frame mask
-       │
-       ▼
-Whisper-Tiny encoder (four layers, 384 hidden size)
-       ├── masked global attention pooling
-       └── final 1.5 s attention + mean + max pooling
-                                │
-                                ▼
-                   LayerNorm → 256 → 64 → logit
-                                │
-                                ▼
-                         calibrated P(EOT)
+16 kHz mono waveform, last 8 seconds
+                  │
+                  ▼
+      80-bin Whisper log-Mel features
+             [batch, 80, 800]
+                  │
+                  ▼
+       Whisper Tiny audio encoder
+       4 layers, hidden size 384
+                  │
+       ┌──────────┴──────────┐
+       │                     │
+       ▼                     ▼
+masked global          final 1.5 seconds
+attention pool      attention + mean + max
+       │                     │
+       └──────────┬──────────┘
+                  ▼
+       fused 1,536-d representation
+                  │
+                  ▼
+ LayerNorm → 256 → GELU → Dropout → 64 → GELU → 1
+                  │
+                  ▼
+        calibrated P(COMPLETE)
 ```
 
-The encoder is initialized from `openai/whisper-tiny`; existing Smart Turn endpoint weights are not
-used to initialize the submitted model. The classifier adds separate auxiliary mid-filler and
-end-filler outputs during training, then discards them for deployment.
-
-## Installation
-
-Python 3.11 or 3.12 is required. The project pins Python 3.12 for `uv`.
-
-```bash
-uv sync --extra dev
-uv run pytest
-uv run turn-detector validate-config --config configs/default.yaml
-```
-
-Install capabilities as needed:
-
-```bash
-# Dataset preparation and offline Hinglish tagging
-uv sync --extra data
-
-# GPU/CPU training
-uv sync --extra data --extra train --extra tracking --extra eval
-
-# ONNX export
-uv sync --extra train --extra export
-
-# Lightweight ONNX runtime (no PyTorch)
-uv sync --extra runtime
-
-# Pinned public Smart Turn v3.2 comparison
-uv sync --extra baselines
-
-# Gradio app
-uv sync --extra train --extra export --extra eval --extra demo
-
-# Hugging Face cache and model publishing commands
-uv sync --extra hub
-```
-
-## RunPod: setup to packaged model
-
-Use a RunPod image with CUDA 12.x, Python 3.11/3.12, and a persistent volume mounted at
-`/workspace`. An A100 40 GB is the reference setup; an A40, L40S, or RTX 4090 also works with a
-smaller physical batch if needed. Reserve at least 150 GB, preferably 200 GB, for Hugging Face
-snapshots, prepared FLAC, checkpoints, exports, and W&B offline files.
-
-Clone the repository onto the persistent volume and bootstrap it:
-
-```bash
-bash scripts/runpod_bootstrap.sh
-```
-
-The script creates `.env` from `.env.example` without overwriting an existing file. Fill these
-values in `.env`:
-
-```dotenv
-HF_TOKEN=hf_...
-HF_MODEL_REPO=your-name/hinglish-turn-8m
-WANDB_API_KEY=...
-WANDB_ENABLED=true
-WANDB_ENTITY=your-wandb-user-or-team
-WANDB_PROJECT=hinglish-turn-detector
-HF_HOME=/workspace/cache/huggingface
-WANDB_DIR=/workspace/artifacts/wandb
-```
-
-`.env` is git-ignored. Tokens are read from the environment only and are not put into resolved
-configs, training reports, cache manifests, release manifests, or W&B run configuration.
-
-Prefetch the two supplied datasets and Whisper Tiny:
-
-```bash
-uv run turn-detector cache-assets --config configs/runpod.yaml
-```
-
-The command uses the standard Hugging Face cache, resumes partial downloads, and records the
-resolved snapshot revisions in `artifacts/cache_manifest.json`. The pipeline immediately derives
-pinned RunPod, E5, and E6 YAML files from that manifest, so preparation and training use the exact
-cached revisions. The full pipeline is:
-
-```bash
-bash scripts/runpod_pipeline.sh
-```
-
-It runs preparation, E5 training, hard-negative mining, E6 training, dynamic weight-only
-INT8 export, calibration, the full evaluation suite, baseline comparison, and release packaging.
-It deliberately stops before uploading anything. Restart at a named stage after an interruption:
-
-```bash
-PIPELINE_START_AT=train_e5 bash scripts/runpod_pipeline.sh
-PIPELINE_START_AT=evaluate PIPELINE_STOP_AFTER=package bash scripts/runpod_pipeline.sh
-```
-
-Valid stages are `cache`, `prepare`, `train_e5`, `mine`, `train_e6`, `export`, `calibrate`,
-`evaluate`, `baselines`, and `package`. Training itself starts a new optimizer run, so restart a
-training stage only when you intend to retrain; dataset downloads reuse the Hugging Face cache.
-
-Every long-running stage emits timestamped `START`, `CHECKPOINT`, `COMPLETE`, or `FAILED` events and
-live progress bars that remain visible through tmux and in the `tee` log. Preparation reports rows
-seen, accepted parents, derived pause records, language exclusions, rejects, rate, elapsed time, and
-ETA. Training reports batches, optimizer steps, loss components,
-learning rates, validation progress, early-stopping state, and checkpoint selection. Evaluation,
-robustness scoring, baseline scoring, quantization calibration, and pipeline stage durations use the
-same progress contract. Set `TURN_DETECTOR_PROGRESS=false` only when machine-readable logs are needed.
-
-W&B logs main/filler/combined losses, both learning rates, causal validation operating points,
-selection score, final metrics, runtime configuration, and the best checkpoint as a model artifact.
-Set `WANDB_MODE=offline` if the pod temporarily has no network, then run `wandb sync` later.
-
-See [`docs/RUNPOD.md`](docs/RUNPOD.md) for sizing, monitoring, and the exact post-training commands.
-
-## Data preparation
-
-### Local bounded audit
-
-The current development machine cannot cache the complete dataset, so use a streamed audit locally:
-
-```bash
-uv run turn-detector data audit \
-  --config configs/default.yaml \
-  --limit 1000
-```
-
-### Full preparation
-
-Run this on a machine with at least 100–150 GB persistent storage:
-
-```bash
-uv run turn-detector data prepare --config configs/default.yaml
-```
-
-For each Hindi/English clip, preparation performs:
-
-1. decoding and 16 kHz mono resampling;
-2. empty-speech, duration, clipping, finite-value, and quality checks;
-3. deterministic speech-boundary detection;
-4. removal of arbitrary trailing silence;
-5. addition of a standardized 200 ms candidate pause;
-6. eight-second truncation and left padding;
-7. exact waveform hashing and coarse acoustic fingerprinting;
-8. duplicate-group-safe train/validation assignment;
-9. causal `HOLD` crops at internal pauses with later speech;
-10. versioned JSONL manifests and audit reports.
-
-Prepared audio is stored as FLAC. Manifest paths are relative, so moving the complete prepared directory preserves reproducibility.
-
-### Optional offline Hinglish audit
-
-The source already provides the supervised fields used by the model: `endpoint_bool`, `midfiller`,
-`endfiller`, `language`, and `synthetic`. Training therefore consumes the prepared manifests
-directly and does not require ASR. The source has no separate Hinglish field, so an optional ASR
-audit remains available for exploratory code-switch analysis:
-
-```bash
-uv sync --extra asr
-uv run turn-detector data tag-all \
-  --data-dir artifacts/data \
-  --model large-v3 \
-  --device cuda \
-  --compute-type float16
-```
-
-This optional command loads faster-whisper once, checkpoints every 250 rows, and safely resumes.
-Its pseudo-labels are not ground truth, are not fed to the turn detector, and are not part of the
-standard RunPod pipeline. Do not run a full-corpus ASR audit merely to begin training.
-
-Inspect any manifest with:
-
-```bash
-uv run turn-detector data summary artifacts/data/train.jsonl
-```
-
-## Experiments and training
-
-The repository encodes the ablation sequence rather than relying on undocumented notebook state:
-
-| Run | Config | Change |
-|---|---|---|
-| E0 | evaluation baseline | fixed 500/800/1200/1600 ms silence |
-| E1 | public checkpoint | Smart Turn v3.2 baseline |
-| E2 | `e2_global.yaml` | global pooling, uniform data |
-| E3 | `e3_focused.yaml` | Hindi/English/filler-focused sampling |
-| E4 | `e4_dual.yaml` | dual global/final-window pooling |
-| E5 | `e5_causal_filler.yaml` | causal pauses and filler auxiliary loss |
-| E6 | `e6_hard_negative.yaml` | mined false-cutoff examples |
-| E7 | export | INT8 ONNX deployment model |
-
-Run an experiment:
-
-```bash
-uv run turn-detector train \
-  --config configs/experiments/e5_causal_filler.yaml
-```
-
-Mine incomplete examples that the model incorrectly considers complete:
-
-```bash
-uv run turn-detector mine-hard-negatives \
-  --model-path artifacts/checkpoints/e5_causal_filler/best \
-  --manifest artifacts/data/train.jsonl \
-  --output artifacts/data/hard_negatives.jsonl \
-  --config configs/default.yaml
-```
-
-Then run E6. Checkpoints contain model weights, the exact model/encoder configuration, optimizer and scheduler state, global step, validation metrics, and resolved YAML.
-
-Training defaults:
-
-- BF16 on one A100;
-- effective batch 256;
-- encoder LR `1e-5`, head LR `1e-4`;
-- four epochs maximum with grouped validation;
-- encoder frozen for the first 500 optimizer steps;
-- `HOLD` errors weighted 2×;
-- manifest-derived sampling mass of 50% Hindi and 50% English, with base COMPLETE/HOLD balance;
-- checkpoint selection by lowest validation endpoint delay at no more than 5% turn-level false cutoffs, with TPR-at-5%-FPR as a fallback when causal rows are unavailable.
-
-The 50/50 language target is calculated from the exact prepared manifest at startup; it does not
-assume a raw corpus ratio. Sampling uses replacement, preserves relative filler/causal priorities
-inside each language/label cell, and logs both expected probability mass and observed batch
-composition to W&B.
-
-W&B is disabled in the default local configuration and enabled by `configs/runpod.yaml` or
-`WANDB_ENABLED=true`. A fixed `WANDB_RUN_ID` resumes only the W&B logging stream; it does not resume
-optimizer/data-loader state.
-
-## Export and inference
-
-Export, verify, and quantize:
-
-```bash
-uv run turn-detector export \
-  --checkpoint artifacts/checkpoints/e6_hard_negative/best \
-  --output artifacts/export/hinglish-turn.onnx \
-  --config configs/default.yaml \
-  --quantize
-```
-
-The RunPod production pipeline uses dynamic weight-only INT8 quantization to preserve Whisper Tiny
-probabilities. Static QDQ activation calibration remains available as an experiment. Export fails
-if PyTorch-to-ONNX FP32 probability error reaches `0.01`; every INT8 export records maximum/mean
-probability deltas, size, method, and its parity verdict.
-
-Fit temperature, threshold, candidate-pause delay, and fallback timeout on validation only:
-
-```bash
-uv run turn-detector calibrate \
-  --model-path artifacts/export/hinglish-turn.int8.onnx \
-  --config configs/default.yaml \
-  --target-false-cutoff-rate 0.05
-```
-
-This updates only the deployment `policy.json` beside the exported model and writes a separate calibration report. The test split is never used for policy selection.
-
-### Package and publish model weights
-
-After export and evaluation, stage only the deployable weights and evidence (never source audio,
-optimizer state, or `.env`):
-
-```bash
-uv run turn-detector package-model \
-  --checkpoint artifacts/checkpoints/e6_hard_negative/best \
-  --export-dir artifacts/export/e6 \
-  --evaluation-dir artifacts/evaluation/e6 \
-  --output artifacts/release/e6
-```
-
-Review `artifacts/release/e6/README.md`, `release_manifest.json`, and all generated metrics. The
-upstream dataset card currently lacks an explicit license, so confirm its terms before uploading
-derived weights. Publishing is a separate, explicit action and creates a private model repo by
-default:
-
-```bash
-uv run turn-detector push-model \
-  --folder artifacts/release/e6 \
-  --repo-id your-name/hinglish-turn-8m \
-  --private \
-  --acknowledge-source-license-review
-```
-
-Use `--public` only after the model card, data terms, and reported measurements have been reviewed.
-
-Score a file:
-
-```bash
-uv run turn-detector predict \
-  --model-path artifacts/export/hinglish-turn.int8.onnx \
-  example.wav
-```
-
-Python API:
-
-```python
-from turn_detector.inference import TurnDetector
-
-detector = TurnDetector.from_pretrained("artifacts/export/hinglish-turn.int8.onnx")
-prediction = detector.score(audio, sample_rate=16_000)
-
-for pcm_chunk in microphone_chunks:
-    event = detector.process_chunk(pcm_chunk, sample_rate=16_000)
-    if event is not None:
-        print(event.as_dict())
-```
-
-The ONNX contract is:
-
-- `input_features`: float32 `[batch, 80, 800]`;
-- `frame_mask`: int64 `[batch, 800]`;
-- `p_complete`: float32 `[batch, 1]`.
+The global branch carries context from the full turn. The tail branch concentrates on recent cadence, hesitation, and fillers. A separate two-output filler head predicts mid-turn and end-turn fillers during training; it is omitted from the exported inference graph.
+
+| Component | Detail |
+|---|---|
+| Backbone | `openai/whisper-tiny` encoder |
+| Total parameters | 8,299,397 |
+| Parameters outside the encoder | 513,413 |
+| Input | 16 kHz mono, last 8 s |
+| Features | 80 Mel bins, 800 frames |
+| Recent window | final 1.5 s |
+| Runtime output | calibrated probability and `COMPLETE` / `HOLD` decision |
+
+## Data preparation and training
+
+The standard pipeline accepts only rows marked `hin` or `eng`. It does not admit audio from the other language groups in the source collection. The main label is `endpoint_bool`; `midfiller` and `endfiller` supervise the auxiliary head.
+
+The source metadata does not contain a human-verified Hinglish or code-switch label. Hindi and filler slices are useful for the intended use case, but they are not a Hinglish benchmark. The project does not claim otherwise.
+
+Preparation performs the following operations:
+
+1. Decode, resample, and normalize to mono 16 kHz.
+2. Reject empty, non-finite, clipped, or invalid-duration audio.
+3. Remove arbitrary terminal silence and add a fixed candidate pause.
+4. Keep the most recent eight seconds and left-pad shorter clips.
+5. Group exact and near duplicates before splitting.
+6. Create causal `HOLD` crops only when later speech proves that the speaker continued.
+7. Store prepared audio as FLAC with versioned JSONL manifests.
+
+The E5 manifest contained 180,589 training examples from 73,679 parent utterances: 73,679 original endpoints and 106,910 causal internal-pause crops. Hard-negative mining added 10,933 difficult `HOLD` examples for E6, producing 191,522 training examples. Validation contained 9,493 examples.
+
+E6 sampling used replacement to create the training mix from the actual manifest:
+
+| Sampling mass | Value |
+|---|---:|
+| Hindi / English | 50% / 50% |
+| COMPLETE / HOLD | 35% / 65% |
+| Filler-bearing examples | 53.4% |
+| Causal-pause examples | 44.9% |
+| Mined hard negatives | 30% |
+
+Training used weighted binary cross entropy for the turn label, with `HOLD` errors weighted 2x, plus a 0.15-weight auxiliary filler loss. The encoder was frozen for the first 500 optimizer steps and then fine-tuned at a lower learning rate than the head.
+
+| Training setting | Value |
+|---|---:|
+| Physical / effective batch | 32 / 256 |
+| Maximum epochs | 4 |
+| Encoder / head learning rate | 1e-5 / 1e-4 |
+| Warmup | 5% |
+| Precision | BF16 |
+| Checkpoint selection | validation endpoint delay subject to ≤5% false cutoffs |
+| Tracking | Weights & Biases |
+
+On the corrected CUDA 12.4 environment, E6 completed in 1,048 seconds on one NVIDIA L40S. Hard-negative mining took 1,198 seconds. See the [technical report](reports/FINAL_REPORT.md) for the run chronology and the CPU-fallback lesson that led to the bootstrap CUDA check.
 
 ## Evaluation
 
-Run the full in-domain suite:
+### Main slices
 
-```bash
-uv run turn-detector evaluate \
-  --model-path artifacts/export/hinglish-turn.int8.onnx \
-  --config configs/default.yaml \
-  --robustness
-```
+| Slice | Count | F1 | False-cutoff rate |
+|---|---:|---:|---:|
+| Hindi | 3,124 | 0.7656 | 11.44% |
+| English | 18,871 | 0.7340 | 3.62% |
+| Mid-filler | 5,099 | 0.7239 | 8.40% |
+| Any filler | 6,235 | 0.7034 | 7.73% |
+| Original endpoint examples | 8,955 | 0.7905 | 6.48% |
 
-This produces more than a toy accuracy number:
+The Hindi F1 is higher than the English F1, but Hindi false cutoffs are much worse. For a turn detector, that distinction matters more than the headline F1.
 
-- classification F1, balanced accuracy, AUROC, average precision;
-- false-cutoff and false-hold rates;
-- Brier score and expected calibration error;
-- Hindi, English, high-confidence Hinglish, filler, source, duration, real/synthetic slices;
-- causal internal-pause versus final-endpoint decisions;
-- threshold/action-delay/timeout sweep;
-- latency at fixed 5% and 10% false-cutoff budgets;
-- a complete Pareto frontier;
-- grouped bootstrap confidence intervals;
-- a turn-group bootstrap interval for the deployed false-cutoff/latency policy;
-- clean, telephone, μ-law, noise, reverb, speed, gain, and clipping robustness;
-- model-only and end-to-end p50/p95/p99 latency.
+Some important slices contain only one class. F1 is undefined for those slices, so the generated report prints `Not available` instead of inventing a value. The full machine-readable report retains the underlying predictions for deeper error analysis.
 
-The key metric is **endpoint delay at a fixed false-cutoff budget**, not raw accuracy. A fixed timeout can avoid interruptions simply by making every response slow.
+### Robustness
 
-Run the paired in-domain baselines after calibration:
+The robustness subset was deterministically stratified across language, label, original/causal examples, filler type, and synthetic status. Every corruption used the same selected records.
 
-```bash
-uv run turn-detector compare-baselines \
-  --model-path artifacts/export/hinglish-turn.int8.onnx \
-  --config configs/default.yaml
-```
+| Condition | F1 | False-cutoff rate |
+|---|---:|---:|
+| Clean subset | 0.7044 | 7.99% |
+| Clipping | 0.6835 | 8.39% |
+| Low gain | 0.6904 | 8.52% |
+| μ-law | 0.7042 | 8.26% |
+| Noise, 20 dB | 0.6905 | 8.26% |
+| Noise, 10 dB | 0.5283 | 13.58% |
+| Noise, 5 dB | 0.3679 | 12.92% |
+| Reverb | 0.5861 | 14.38% |
+| Speed 0.9x | 0.6653 | 10.12% |
+| Speed 1.1x | 0.6608 | 7.59% |
+| Telephone | 0.6477 | 11.05% |
 
-This compares identical test rows against fixed 500/800/1200/1600 ms timeouts and the official `smart-turn-v3.2-cpu.onnx` pinned to its v3.2 release commit. It reports slice metrics, deployed causal policies, McNemar's paired test, and a paired group-bootstrap F1 delta. It performs no test-set threshold tuning.
+Moderate noise, clipping, gain changes, and μ-law remain usable. Heavy noise and reverb are clear failure modes and should be addressed with targeted augmentation before treating this as a production endpointing policy.
 
-### Independent LiveKit EOT Bench
+### Quantization
 
-Install [`livekit/eot-bench`](https://github.com/livekit/eot-bench), point the adapter at the model, and evaluate only Hindi and English:
+Static activation quantization made the model smaller but changed its probabilities too much. It was rejected. Dynamic weight-only quantization is slightly larger and preserves the FP32 scores closely enough for deployment.
 
-```bash
-export HINGLISH_TURN_MODEL="$PWD/artifacts/export/hinglish-turn.int8.onnx"
-
-eot-harness predict \
-  --path livekit/eot-bench-data \
-  --name all \
-  --split validation \
-  --adapter turn_detector.evaluation.livekit_adapter:HinglishTurnAudioAdapter \
-  --output-dir artifacts/eot-bench
-```
-
-The adapter explicitly rejects unsupported language codes. External benchmark audio is evaluation-only and never enters training, ASR tagging, calibration, or threshold selection.
+| Export | Size | Max probability delta | Mean delta | Decision |
+|---|---:|---:|---:|---|
+| FP32 ONNX | 31.73 MiB | 0.000001 vs PyTorch | — | Reference |
+| Static INT8 QDQ | 8.68 MiB | 0.574263 | — | Rejected |
+| Dynamic INT8 weight-only | 10.16 MiB | 0.017759 | 0.009105 | Selected |
 
 ### CPU latency
 
+Latency was measured with ONNX Runtime using one intra-op thread on the RunPod x86 host. Model-only timing excludes feature extraction. End-to-end timing includes waveform standardization, Whisper log-Mel extraction, calibration, and ONNX inference; it excludes audio decoding and policy silence waiting.
+
+| Path | p50 | p95 | p99 |
+|---|---:|---:|---:|
+| Model only | 39.15 ms | 75.89 ms | 79.14 ms |
+| End to end | 47.36 ms | 82.36 ms | 87.90 ms |
+
+## Use the model
+
+The Hugging Face repository is private until its distribution terms are reviewed. Authenticate with a read token before loading it remotely.
+
 ```bash
-uv run turn-detector benchmark \
-  --model-path artifacts/export/hinglish-turn.int8.onnx \
-  --audio-path example.wav \
-  --iterations 1000
+uv sync --extra runtime
 ```
 
-The acceptance target is an INT8 model no larger than 10 MB and warm p95 model inference below 100 ms on a fixed four-vCPU x86 machine.
+```python
+from turn_detector.audio import load_audio
+from turn_detector.inference import TurnDetector
 
-## Gradio demo
+detector = TurnDetector.from_pretrained("Mayank022/hinglish-turn-detector-whisper-tiny-dual-scale")
+audio, sample_rate = load_audio("candidate_pause.wav")
+prediction = detector.score(audio, sample_rate)
 
-```bash
-uv run turn-detector demo \
-  --model-path artifacts/export/hinglish-turn.int8.onnx
+print(prediction.probability)
+print(prediction.decision)
+print(prediction.recommended_wait_ms)
 ```
 
-The demo supports microphone and file input, displays the waveform/candidate pause, and returns probability, decision, recommended wait, and measured model latency.
-
-For a Hugging Face Gradio Space, include the exported ONNX/config/policy files, set `HINGLISH_TURN_MODEL` to the ONNX path, and use [`app.py`](app.py) as the entry point. No Space or model repository is created automatically.
-
-## Cloud execution
-
-[`infra/modal_app.py`](infra/modal_app.py) defines reproducible Modal jobs but creates and runs nothing on import. After explicit cost approval:
+To score a local release:
 
 ```bash
-modal volume create hinglish-turn-data
-modal run infra/modal_app.py::prepare
-modal run infra/modal_app.py::train_model
-modal run infra/modal_app.py::evaluate_and_export
+uv run turn-detector predict \
+  --model-path artifacts/release/e6_dynamic/hinglish-turn.int8.onnx \
+  candidate_pause.wav
 ```
 
-For the documented ablations, run `train_experiment` for E2 through E5, mine from E5, then run E6. The functions are definitions only and do not launch until you execute these commands:
+The exported ONNX contract is:
+
+| Tensor | Type and shape |
+|---|---|
+| `input_features` | float32 `[batch, 80, 800]` |
+| `frame_mask` | int64 `[batch, 800]` |
+| `p_complete` | float32 `[batch, 1]` |
+
+## Gradio and Hugging Face Spaces
+
+Launch the polished microphone/upload demo locally:
 
 ```bash
-modal run infra/modal_app.py::train_experiment --experiment e2_global
-modal run infra/modal_app.py::train_experiment --experiment e3_focused
-modal run infra/modal_app.py::train_experiment --experiment e4_dual
-modal run infra/modal_app.py::train_experiment --experiment e5_causal_filler
-modal run infra/modal_app.py::mine_hard_negatives
-modal run infra/modal_app.py::train_experiment --experiment e6_hard_negative
-modal run infra/modal_app.py::evaluate_and_export --experiment e6_hard_negative
+uv sync --extra runtime --extra demo
+HINGLISH_TURN_MODEL=Mayank022/hinglish-turn-detector-whisper-tiny-dual-scale \
+uv run python app.py
 ```
 
-Recommended allocation:
+The interface shows the calibrated probability, `COMPLETE` / `HOLD` policy decision, model
+latency, recommended wait, and an annotated waveform. It also includes the measured E6 results,
+architecture, and limitations. The `/predict` Gradio endpoint remains available for programmatic
+clients.
 
-- one A100 40 GB or 80 GB;
-- 16 CPU cores;
-- 48–64 GB RAM;
-- 150 GB persistent volume;
-- approximately 8–16 A100-hours for experiments, mining, export, and full evaluation.
+For deployment, use [`SPACE_README.md`](SPACE_README.md) as the Space repository README and follow
+[`docs/HUGGINGFACE_SPACE.md`](docs/HUGGINGFACE_SPACE.md). A private model requires an `HF_TOKEN`
+Space secret with read access. No token is stored in this repository.
 
-Expected wall-clock depends mainly on how many Hindi/English rows survive audit and on GPU
-throughput. A practical sequence is roughly 1–3 hours for streamed preparation, 45–120 minutes per
-Whisper-Tiny experiment, and 1–3 hours for mining/export/full evaluation. These are planning
-estimates, not measurements from this repository.
+## Train and reproduce
 
-## Reproducibility and tests
+Python 3.11 or 3.12 is supported. The reproducible RunPod path uses `uv`, pinned source and base-model revisions, a persistent `/workspace` volume, tmux, W&B, and explicit Hugging Face publishing.
 
 ```bash
+bash scripts/runpod_bootstrap.sh
+bash scripts/runpod_pipeline.sh
+```
+
+The pipeline runs:
+
+```text
+cache → prepare → E5 → hard-negative mining → E6 → dynamic INT8 export
+      → calibration → evaluation → baseline comparison → package
+```
+
+It never uploads a model automatically. Restart from a completed stage when necessary:
+
+```bash
+PIPELINE_START_AT=mine \
+bash scripts/runpod_pipeline.sh
+```
+
+For an existing verified dynamic export, finalize all downstream evidence with:
+
+```bash
+bash scripts/runpod_dynamic_finalize.sh
+```
+
+Long stages emit timestamped progress, ETA, checkpoint, validation, and completion events. Full RunPod setup, monitoring, recovery, and upload commands are in [docs/RUNPOD.md](docs/RUNPOD.md).
+
+Run local checks with:
+
+```bash
+uv sync --extra dev
 uv run ruff check .
-uv run ruff format --check .
-uv run pytest --cov=turn_detector
+uv run mypy src
+uv run pytest
 ```
 
-Tests cover configuration constraints, audio boundaries, causal pauses, corruptions, code-mix heuristics, resumable ASR tagging, exact and near-duplicate-safe splits (including cross-repository train/test checks), sampling mass, manifest round trips, classification/calibration metrics, policy sweeps and paired bootstraps, preparation fixtures, and a tiny random Whisper forward pass when ML dependencies are installed.
+## Repository map
 
-## Honest limitations
+```text
+configs/                 data, model, training, policy, and experiment configs
+scripts/                 RunPod bootstrap and end-to-end pipelines
+src/turn_detector/       preparation, model, trainer, inference, export, evaluation
+tests/                   data, sampling, model, calibration, and evaluation tests
+reports/FINAL_REPORT.md  measured E6 report and failure analysis
+reports/METHODOLOGY.md   experiment and evaluation contract
+docs/RUNPOD.md           cloud setup and operational commands
+app.py                   Gradio entry point
+```
 
-- The source dataset does not identify Hinglish directly; code-mix labels are ASR-derived and must be reported as such.
-- Speaker identity is unavailable, so splitting uses duplicate groups and source strata rather than verified speaker-disjoint identities.
-- Much of the supplied Hindi data is synthetic; all reports must separate real and synthetic performance.
-- The model handles endpointing, not backchannel-versus-barge-in classification or multi-speaker diarization.
-- Whisper ignores a feature attention mask internally; the mask is applied to global/tail pooling, while standardized silence controls padding artifacts.
-- A model is promoted only when it improves the latency/false-cutoff frontier. If the public Smart Turn baseline wins, the report must say so.
+## Limits
+
+- There is no human-verified Hinglish/code-switch label in the source metadata, so this release has no measured Hinglish-specific score.
+- Hindi false cutoffs (11.44%) and filler false cutoffs (7.73%) exceed the overall target.
+- Heavy noise and reverb cause large regressions.
+- English rows are not guaranteed to be exclusively Indian English.
+- Speaker identities are unavailable; split protection uses parent utterances, hashes, acoustic fingerprints, and source strata.
+- Some Hindi audio is synthetic.
+- The model uses audio only. It does not see transcript semantics, conversation history, dialog state, or speaker identity.
+- This is endpoint detection, not VAD, diarization, backchannel classification, or barge-in policy.
+
+The source collection does not currently state one explicit license for the complete dataset. The model repository therefore remains private with `license: other` until derived-weight distribution terms are reviewed. Source audio, API keys, and optimizer state are excluded from the packaged release.

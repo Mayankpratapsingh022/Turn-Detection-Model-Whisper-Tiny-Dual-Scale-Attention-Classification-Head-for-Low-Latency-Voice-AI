@@ -1,5 +1,8 @@
 # HinglishTurn-8M Technical Report
 
+> The completed E6 report is available in [`FINAL_REPORT.md`](FINAL_REPORT.md). Keep this file as a
+> blank structure for future runs rather than overwriting measured release results.
+
 ## Claim and operating constraint
 
 State the exact model selected, model size, CPU, p50/p95 latency, and the fixed false-cutoff budget used to rank models. Do not call the model state of the art unless an independent benchmark supports it.
